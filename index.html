@@ -328,6 +328,9 @@
             overflow-y: auto;
             flex: 1;
             max-height: 600px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.6;
         }
 
         .panel-content img {
@@ -619,15 +622,21 @@
             const files = Array.from(e.target.files);
             if (files.length === 0) return;
 
-            showStatus(`Processing ${files.length} image(s)...`, 'info');
+            showStatus(`🔍 Analyzing ${files.length} image(s)...`, 'info');
 
+            let totalCards = 0;
             for (const file of files) {
                 const cards = await detectCards(file);
                 uploadedCards.push(...cards);
+                totalCards += cards.length;
+                
+                if (cards.length > 1) {
+                    showStatus(`✂️ Found ${cards.length} obituaries in ${file.name}. Total: ${uploadedCards.length}`, 'info');
+                }
             }
 
             displayCardsGrid();
-            showStatus(`✓ Loaded ${uploadedCards.length} card(s)`, 'success');
+            showStatus(`✓ Loaded ${uploadedCards.length} obituary card(s) from ${files.length} image(s)`, 'success');
             document.getElementById('uploadControls').classList.remove('hidden');
         }
 
@@ -645,15 +654,10 @@
                         canvas.height = img.height;
                         ctx.drawImage(img, 0, 0);
 
-                        // For now, treat entire image as one card
-                        // You could implement card detection here if needed
-                        const cards = [{
-                            canvas: canvas,
-                            dataUrl: canvas.toDataURL('image/jpeg', 0.95),
-                            rotated: false
-                        }];
+                        // Detect individual obituary cards
+                        const cards = await findObituaryRegions(canvas);
 
-                        // Auto-rotate detection
+                        // Auto-rotate detection for each card
                         for (let card of cards) {
                             await autoRotateCard(card);
                         }
@@ -664,6 +668,154 @@
                 };
                 reader.readAsDataURL(file);
             });
+        }
+
+        async function findObituaryRegions(sourceCanvas) {
+            const ctx = sourceCanvas.getContext('2d');
+            const imageData = ctx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+            const data = imageData.data;
+
+            // Convert to grayscale and find text regions
+            const grayData = new Uint8ClampedArray(sourceCanvas.width * sourceCanvas.height);
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                grayData[i / 4] = gray;
+            }
+
+            // Find regions with significant text density
+            const blockSize = 50; // Check in 50x50 pixel blocks
+            const textRegions = [];
+            
+            for (let y = 0; y < sourceCanvas.height - blockSize; y += blockSize) {
+                for (let x = 0; x < sourceCanvas.width - blockSize; x += blockSize) {
+                    let textPixels = 0;
+                    let totalPixels = 0;
+                    
+                    for (let by = 0; by < blockSize; by++) {
+                        for (let bx = 0; bx < blockSize; bx++) {
+                            const idx = (y + by) * sourceCanvas.width + (x + bx);
+                            const gray = grayData[idx];
+                            totalPixels++;
+                            // Dark pixels likely indicate text
+                            if (gray < 180) textPixels++;
+                        }
+                    }
+                    
+                    const textDensity = textPixels / totalPixels;
+                    if (textDensity > 0.15) { // At least 15% dark pixels
+                        textRegions.push({ x, y, density: textDensity });
+                    }
+                }
+            }
+
+            if (textRegions.length === 0) {
+                // No text regions found, return whole image
+                return [{
+                    canvas: sourceCanvas,
+                    dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+                    rotated: false
+                }];
+            }
+
+            // Cluster nearby regions into separate obituaries
+            const clusters = clusterRegions(textRegions, sourceCanvas.width, sourceCanvas.height);
+            
+            if (clusters.length <= 1) {
+                // Only one cluster, return whole image
+                return [{
+                    canvas: sourceCanvas,
+                    dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+                    rotated: false
+                }];
+            }
+
+            // Extract each clustered region
+            const cards = [];
+            for (const cluster of clusters) {
+                const padding = 20;
+                const x = Math.max(0, cluster.minX - padding);
+                const y = Math.max(0, cluster.minY - padding);
+                const w = Math.min(sourceCanvas.width - x, cluster.maxX - cluster.minX + padding * 2);
+                const h = Math.min(sourceCanvas.height - y, cluster.maxY - cluster.minY + padding * 2);
+
+                // Skip very small regions
+                const minArea = (sourceCanvas.width * sourceCanvas.height) * 0.05;
+                if (w * h < minArea) continue;
+
+                const cardCanvas = document.createElement('canvas');
+                cardCanvas.width = w;
+                cardCanvas.height = h;
+                const cardCtx = cardCanvas.getContext('2d');
+                cardCtx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
+
+                cards.push({
+                    canvas: cardCanvas,
+                    dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
+                    rotated: false
+                });
+            }
+
+            return cards.length > 0 ? cards : [{
+                canvas: sourceCanvas,
+                dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+                rotated: false
+            }];
+        }
+
+        function clusterRegions(regions, width, height) {
+            if (regions.length === 0) return [];
+
+            // Sort regions by position (top to bottom, left to right)
+            regions.sort((a, b) => {
+                if (Math.abs(a.y - b.y) < height * 0.1) {
+                    return a.x - b.x; // Same row, sort by x
+                }
+                return a.y - b.y; // Different rows, sort by y
+            });
+
+            const clusters = [];
+            let currentCluster = {
+                regions: [regions[0]],
+                minX: regions[0].x,
+                maxX: regions[0].x + 50,
+                minY: regions[0].y,
+                maxY: regions[0].y + 50
+            };
+
+            for (let i = 1; i < regions.length; i++) {
+                const region = regions[i];
+                const distanceX = Math.min(
+                    Math.abs(region.x - currentCluster.minX),
+                    Math.abs(region.x - currentCluster.maxX)
+                );
+                const distanceY = Math.min(
+                    Math.abs(region.y - currentCluster.minY),
+                    Math.abs(region.y - currentCluster.maxY)
+                );
+
+                // If close enough, add to current cluster
+                const threshold = Math.min(width, height) * 0.15;
+                if (distanceX < threshold && distanceY < threshold) {
+                    currentCluster.regions.push(region);
+                    currentCluster.minX = Math.min(currentCluster.minX, region.x);
+                    currentCluster.maxX = Math.max(currentCluster.maxX, region.x + 50);
+                    currentCluster.minY = Math.min(currentCluster.minY, region.y);
+                    currentCluster.maxY = Math.max(currentCluster.maxY, region.y + 50);
+                } else {
+                    // Start new cluster
+                    clusters.push(currentCluster);
+                    currentCluster = {
+                        regions: [region],
+                        minX: region.x,
+                        maxX: region.x + 50,
+                        minY: region.y,
+                        maxY: region.y + 50
+                    };
+                }
+            }
+            clusters.push(currentCluster);
+
+            return clusters;
         }
 
         async function autoRotateCard(card) {
@@ -823,11 +975,96 @@
         async function performOCR(canvas) {
             try {
                 const result = await tesseractWorker.recognize(canvas);
-                return result.data.text;
+                return cleanOCRText(result.data.text);
             } catch (err) {
                 console.error('OCR Error:', err);
                 return 'Error performing OCR';
             }
+        }
+
+        function cleanOCRText(text) {
+            if (!text) return '';
+
+            // Remove multiple spaces
+            text = text.replace(/ {2,}/g, ' ');
+
+            // Fix common OCR errors
+            text = text.replace(/\|/g, 'I'); // | often misread as I
+            text = text.replace(/\bBaturday\b/gi, 'Saturday');
+            text = text.replace(/\bfnvited\b/gi, 'invited');
+            text = text.replace(/\bnoto-\d+t\*/g, ''); // Remove OCR artifacts
+
+            // Handle broken words across lines
+            const lines = text.split('\n');
+            const cleanedLines = [];
+            
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i].trim();
+                if (!line) continue;
+
+                // Check if line ends with a hyphen (word break)
+                if (line.endsWith('-') && i < lines.length - 1) {
+                    const nextLine = lines[i + 1].trim();
+                    if (nextLine) {
+                        // Join the broken word
+                        const wordStart = line.slice(0, -1);
+                        const nextWords = nextLine.split(' ');
+                        line = wordStart + nextWords[0];
+                        
+                        // Add rest of next line
+                        if (nextWords.length > 1) {
+                            line += ' ' + nextWords.slice(1).join(' ');
+                        }
+                        i++; // Skip next line since we consumed it
+                    }
+                }
+                
+                // Check if this line should be joined to previous
+                // (doesn't start with capital, doesn't end with period)
+                if (cleanedLines.length > 0 && line.length > 0) {
+                    const lastLine = cleanedLines[cleanedLines.length - 1];
+                    const lastChar = lastLine[lastLine.length - 1];
+                    const firstChar = line[0];
+                    
+                    // If previous line didn't end with punctuation and this doesn't start with capital
+                    // (unless it's a proper noun or start of sentence)
+                    if (!['.', '!', '?', ':', ';'].includes(lastChar) && 
+                        firstChar === firstChar.toLowerCase() &&
+                        !lastLine.endsWith(',')) {
+                        // Join to previous line
+                        cleanedLines[cleanedLines.length - 1] += ' ' + line;
+                        continue;
+                    }
+                }
+
+                cleanedLines.push(line);
+            }
+
+            // Join lines into paragraphs
+            let result = '';
+            for (let i = 0; i < cleanedLines.length; i++) {
+                const line = cleanedLines[i];
+                result += line;
+                
+                // Add appropriate spacing
+                if (i < cleanedLines.length - 1) {
+                    const nextLine = cleanedLines[i + 1];
+                    // New paragraph if next line starts with capital or is clearly new section
+                    if (nextLine[0] === nextLine[0].toUpperCase() && 
+                        (line.endsWith('.') || line.endsWith('!') || line.endsWith('?'))) {
+                        result += '\n\n';
+                    } else {
+                        result += ' ';
+                    }
+                }
+            }
+
+            // Final cleanup
+            result = result.replace(/ +/g, ' '); // Remove multiple spaces again
+            result = result.replace(/\n{3,}/g, '\n\n'); // Max 2 line breaks
+            result = result.trim();
+
+            return result;
         }
 
         async function extractFacts(text) {
@@ -977,7 +1214,12 @@ ${text}`
             document.getElementById('detailTitle').textContent = 
                 `Card ${index + 1} of ${processedData.length}`;
             document.getElementById('detailImage').src = item.image;
-            document.getElementById('detailText').textContent = item.text;
+            
+            // Display text with preserved formatting
+            const textDiv = document.getElementById('detailText');
+            textDiv.innerHTML = ''; // Clear previous
+            const textNode = document.createTextNode(item.text);
+            textDiv.appendChild(textNode);
 
             // Display facts
             const factsDiv = document.getElementById('detailFacts');

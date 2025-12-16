@@ -654,8 +654,8 @@
                         canvas.height = img.height;
                         ctx.drawImage(img, 0, 0);
 
-                        // Detect individual obituary cards
-                        const cards = await findObituaryRegions(canvas);
+                        // Detect individual obituary cards using contour detection
+                        const cards = findCardsWithContours(canvas);
 
                         // Auto-rotate detection for each card
                         for (let card of cards) {
@@ -670,46 +670,52 @@
             });
         }
 
-        async function findObituaryRegions(sourceCanvas) {
+        function findCardsWithContours(sourceCanvas) {
             const ctx = sourceCanvas.getContext('2d');
-            const imageData = ctx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+            const width = sourceCanvas.width;
+            const height = sourceCanvas.height;
+            const imageData = ctx.getImageData(0, 0, width, height);
             const data = imageData.data;
 
-            // Convert to grayscale and find text regions
-            const grayData = new Uint8ClampedArray(sourceCanvas.width * sourceCanvas.height);
+            // Convert to grayscale
+            const gray = new Uint8ClampedArray(width * height);
             for (let i = 0; i < data.length; i += 4) {
-                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-                grayData[i / 4] = gray;
+                const avg = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                gray[i / 4] = avg;
             }
 
-            // Find regions with significant text density
-            const blockSize = 50; // Check in 50x50 pixel blocks
-            const textRegions = [];
-            
-            for (let y = 0; y < sourceCanvas.height - blockSize; y += blockSize) {
-                for (let x = 0; x < sourceCanvas.width - blockSize; x += blockSize) {
-                    let textPixels = 0;
-                    let totalPixels = 0;
-                    
-                    for (let by = 0; by < blockSize; by++) {
-                        for (let bx = 0; bx < blockSize; bx++) {
-                            const idx = (y + by) * sourceCanvas.width + (x + bx);
-                            const gray = grayData[idx];
-                            totalPixels++;
-                            // Dark pixels likely indicate text
-                            if (gray < 180) textPixels++;
-                        }
-                    }
-                    
-                    const textDensity = textPixels / totalPixels;
-                    if (textDensity > 0.15) { // At least 15% dark pixels
-                        textRegions.push({ x, y, density: textDensity });
+            // Adaptive threshold (similar to cv2.adaptiveThreshold)
+            const binary = adaptiveThreshold(gray, width, height, 11, 2);
+
+            // Morphological closing to connect nearby regions
+            const closed = morphClose(binary, width, height, 3);
+
+            // Find contours
+            const contours = findContours(closed, width, height);
+
+            // Filter and sort contours
+            const minArea = (width * height) * 0.05;
+            const validContours = [];
+
+            for (const contour of contours) {
+                const area = contour.area;
+                if (area > minArea) {
+                    const aspectRatio = Math.max(contour.w, contour.h) / Math.min(contour.w, contour.h);
+                    // Skip very elongated shapes (aspect ratio > 10)
+                    if (aspectRatio <= 10) {
+                        validContours.push(contour);
                     }
                 }
             }
 
-            if (textRegions.length === 0) {
-                // No text regions found, return whole image
+            // Sort by area (largest first)
+            validContours.sort((a, b) => b.area - a.area);
+
+            // Take top 6 largest contours
+            const topContours = validContours.slice(0, 6);
+
+            if (topContours.length === 0) {
+                // No contours found, return whole image
                 return [{
                     canvas: sourceCanvas,
                     dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
@@ -717,42 +723,28 @@
                 }];
             }
 
-            // Cluster nearby regions into separate obituaries
-            const clusters = clusterRegions(textRegions, sourceCanvas.width, sourceCanvas.height);
-            
-            if (clusters.length <= 1) {
-                // Only one cluster, return whole image
-                return [{
-                    canvas: sourceCanvas,
-                    dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
-                    rotated: false
-                }];
-            }
-
-            // Extract each clustered region
+            // Extract each card
             const cards = [];
-            for (const cluster of clusters) {
-                const padding = 20;
-                const x = Math.max(0, cluster.minX - padding);
-                const y = Math.max(0, cluster.minY - padding);
-                const w = Math.min(sourceCanvas.width - x, cluster.maxX - cluster.minX + padding * 2);
-                const h = Math.min(sourceCanvas.height - y, cluster.maxY - cluster.minY + padding * 2);
+            for (const contour of topContours) {
+                const padding = 10;
+                const x = Math.max(0, contour.x - padding);
+                const y = Math.max(0, contour.y - padding);
+                const w = Math.min(width - x, contour.w + 2 * padding);
+                const h = Math.min(height - y, contour.h + 2 * padding);
 
-                // Skip very small regions
-                const minArea = (sourceCanvas.width * sourceCanvas.height) * 0.05;
-                if (w * h < minArea) continue;
+                if (w > 0 && h > 0) {
+                    const cardCanvas = document.createElement('canvas');
+                    cardCanvas.width = w;
+                    cardCanvas.height = h;
+                    const cardCtx = cardCanvas.getContext('2d');
+                    cardCtx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
 
-                const cardCanvas = document.createElement('canvas');
-                cardCanvas.width = w;
-                cardCanvas.height = h;
-                const cardCtx = cardCanvas.getContext('2d');
-                cardCtx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
-
-                cards.push({
-                    canvas: cardCanvas,
-                    dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
-                    rotated: false
-                });
+                    cards.push({
+                        canvas: cardCanvas,
+                        dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
+                        rotated: false
+                    });
+                }
             }
 
             return cards.length > 0 ? cards : [{
@@ -762,60 +754,153 @@
             }];
         }
 
-        function clusterRegions(regions, width, height) {
-            if (regions.length === 0) return [];
+        function adaptiveThreshold(gray, width, height, blockSize, C) {
+            const binary = new Uint8ClampedArray(width * height);
+            const halfBlock = Math.floor(blockSize / 2);
 
-            // Sort regions by position (top to bottom, left to right)
-            regions.sort((a, b) => {
-                if (Math.abs(a.y - b.y) < height * 0.1) {
-                    return a.x - b.x; // Same row, sort by x
-                }
-                return a.y - b.y; // Different rows, sort by y
-            });
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let sum = 0;
+                    let count = 0;
 
-            const clusters = [];
-            let currentCluster = {
-                regions: [regions[0]],
-                minX: regions[0].x,
-                maxX: regions[0].x + 50,
-                minY: regions[0].y,
-                maxY: regions[0].y + 50
-            };
+                    // Calculate local mean
+                    for (let by = -halfBlock; by <= halfBlock; by++) {
+                        for (let bx = -halfBlock; bx <= halfBlock; bx++) {
+                            const ny = y + by;
+                            const nx = x + bx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                sum += gray[ny * width + nx];
+                                count++;
+                            }
+                        }
+                    }
 
-            for (let i = 1; i < regions.length; i++) {
-                const region = regions[i];
-                const distanceX = Math.min(
-                    Math.abs(region.x - currentCluster.minX),
-                    Math.abs(region.x - currentCluster.maxX)
-                );
-                const distanceY = Math.min(
-                    Math.abs(region.y - currentCluster.minY),
-                    Math.abs(region.y - currentCluster.maxY)
-                );
-
-                // If close enough, add to current cluster
-                const threshold = Math.min(width, height) * 0.15;
-                if (distanceX < threshold && distanceY < threshold) {
-                    currentCluster.regions.push(region);
-                    currentCluster.minX = Math.min(currentCluster.minX, region.x);
-                    currentCluster.maxX = Math.max(currentCluster.maxX, region.x + 50);
-                    currentCluster.minY = Math.min(currentCluster.minY, region.y);
-                    currentCluster.maxY = Math.max(currentCluster.maxY, region.y + 50);
-                } else {
-                    // Start new cluster
-                    clusters.push(currentCluster);
-                    currentCluster = {
-                        regions: [region],
-                        minX: region.x,
-                        maxX: region.x + 50,
-                        minY: region.y,
-                        maxY: region.y + 50
-                    };
+                    const mean = sum / count;
+                    const threshold = mean - C;
+                    const idx = y * width + x;
+                    
+                    // Invert the threshold (THRESH_BINARY_INV)
+                    binary[idx] = gray[idx] < threshold ? 255 : 0;
                 }
             }
-            clusters.push(currentCluster);
 
-            return clusters;
+            return binary;
+        }
+
+        function morphClose(binary, width, height, kernelSize) {
+            // Dilate then erode
+            const dilated = morphDilate(binary, width, height, kernelSize);
+            return morphErode(dilated, width, height, kernelSize);
+        }
+
+        function morphDilate(binary, width, height, kernelSize) {
+            const result = new Uint8ClampedArray(width * height);
+            const halfKernel = Math.floor(kernelSize / 2);
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let maxVal = 0;
+
+                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                            const ny = y + ky;
+                            const nx = x + kx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                maxVal = Math.max(maxVal, binary[ny * width + nx]);
+                            }
+                        }
+                    }
+
+                    result[y * width + x] = maxVal;
+                }
+            }
+
+            return result;
+        }
+
+        function morphErode(binary, width, height, kernelSize) {
+            const result = new Uint8ClampedArray(width * height);
+            const halfKernel = Math.floor(kernelSize / 2);
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let minVal = 255;
+
+                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                            const ny = y + ky;
+                            const nx = x + kx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                minVal = Math.min(minVal, binary[ny * width + nx]);
+                            }
+                        }
+                    }
+
+                    result[y * width + x] = minVal;
+                }
+            }
+
+            return result;
+        }
+
+        function findContours(binary, width, height) {
+            const visited = new Uint8ClampedArray(width * height);
+            const contours = [];
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = y * width + x;
+                    if (binary[idx] === 255 && !visited[idx]) {
+                        // Start flood fill to find contour
+                        const contour = floodFill(binary, visited, width, height, x, y);
+                        if (contour) {
+                            contours.push(contour);
+                        }
+                    }
+                }
+            }
+
+            return contours;
+        }
+
+        function floodFill(binary, visited, width, height, startX, startY) {
+            const stack = [[startX, startY]];
+            let minX = startX, maxX = startX;
+            let minY = startY, maxY = startY;
+            let pixelCount = 0;
+
+            while (stack.length > 0) {
+                const [x, y] = stack.pop();
+                const idx = y * width + x;
+
+                if (x < 0 || x >= width || y < 0 || y >= height) continue;
+                if (visited[idx] || binary[idx] !== 255) continue;
+
+                visited[idx] = 1;
+                pixelCount++;
+
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+
+                // Add 4-connected neighbors
+                stack.push([x + 1, y]);
+                stack.push([x - 1, y]);
+                stack.push([x, y + 1]);
+                stack.push([x, y - 1]);
+            }
+
+            const w = maxX - minX + 1;
+            const h = maxY - minY + 1;
+
+            return {
+                x: minX,
+                y: minY,
+                w: w,
+                h: h,
+                area: w * h
+            };
         }
 
         async function autoRotateCard(card) {

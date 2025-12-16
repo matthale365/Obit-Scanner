@@ -923,7 +923,7 @@
             let bestRotation = 0;
             let bestConfidence = 0;
             
-            // Test each rotation
+            // Test each 90-degree rotation
             for (let rotation = 0; rotation < 4; rotation++) {
                 const rotatedCanvas = rotateCanvas(tempCanvas, rotation * 90);
                 
@@ -938,12 +938,181 @@
                 }
             }
             
-            // Apply best rotation to actual card
+            // Apply best 90-degree rotation to actual card
             if (bestRotation > 0) {
                 card.canvas = rotateCanvas(card.canvas, bestRotation * 90);
                 card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
                 card.rotated = true;
             }
+            
+            // Now deskew to straighten any remaining angle
+            await deskewCard(card);
+        }
+
+        async function deskewCard(card) {
+            try {
+                // Detect the skew angle using Tesseract
+                const result = await tesseractWorker.recognize(card.canvas);
+                
+                // Tesseract doesn't directly give us skew angle, so we'll detect it ourselves
+                const angle = detectSkewAngle(card.canvas);
+                
+                if (Math.abs(angle) > 0.5) { // Only deskew if angle is significant
+                    card.canvas = rotateCanvasSmooth(card.canvas, -angle);
+                    card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
+                    card.rotated = true;
+                }
+            } catch (err) {
+                console.error('Deskew error:', err);
+            }
+        }
+
+        function detectSkewAngle(canvas) {
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+
+            // Convert to grayscale
+            const gray = new Uint8ClampedArray(width * height);
+            for (let i = 0; i < data.length; i += 4) {
+                gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            }
+
+            // Apply edge detection (simple Sobel)
+            const edges = [];
+            for (let y = 1; y < height - 1; y++) {
+                for (let x = 1; x < width - 1; x++) {
+                    const idx = y * width + x;
+                    const gx = gray[idx + 1] - gray[idx - 1];
+                    const gy = gray[idx + width] - gray[idx - width];
+                    const magnitude = Math.sqrt(gx * gx + gy * gy);
+                    
+                    if (magnitude > 50) { // Edge threshold
+                        edges.push({ x, y, angle: Math.atan2(gy, gx) });
+                    }
+                }
+            }
+
+            if (edges.length < 100) return 0; // Not enough edges
+
+            // Hough transform to find dominant angle
+            const angleRange = 45; // Check angles from -45 to +45 degrees
+            const angleBins = 180;
+            const histogram = new Array(angleBins).fill(0);
+
+            for (const edge of edges) {
+                let angle = (edge.angle * 180 / Math.PI + 90) % 180;
+                if (angle < 0) angle += 180;
+                
+                const bin = Math.floor(angle);
+                if (bin >= 0 && bin < angleBins) {
+                    histogram[bin]++;
+                }
+            }
+
+            // Find the dominant angle (peak in histogram)
+            // Focus on angles near horizontal (around 0 or 180)
+            let maxVotes = 0;
+            let dominantAngle = 0;
+
+            // Check angles near 0 degrees
+            for (let angle = -angleRange; angle <= angleRange; angle++) {
+                let bin = angle;
+                if (bin < 0) bin += 180;
+                if (bin >= 0 && bin < angleBins && histogram[bin] > maxVotes) {
+                    maxVotes = histogram[bin];
+                    dominantAngle = angle;
+                }
+            }
+
+            // Check angles near 180 degrees
+            for (let angle = 180 - angleRange; angle <= 180; angle++) {
+                const normalizedAngle = angle - 180;
+                if (histogram[angle] > maxVotes) {
+                    maxVotes = histogram[angle];
+                    dominantAngle = normalizedAngle;
+                }
+            }
+
+            // Return the angle needed to straighten (negate because we want to counter-rotate)
+            return dominantAngle;
+        }
+
+        function rotateCanvasSmooth(canvas, degrees) {
+            // Create a larger canvas to avoid clipping during rotation
+            const angle = (degrees * Math.PI) / 180;
+            const cos = Math.abs(Math.cos(angle));
+            const sin = Math.abs(Math.sin(angle));
+            
+            const newWidth = Math.ceil(canvas.width * cos + canvas.height * sin);
+            const newHeight = Math.ceil(canvas.width * sin + canvas.height * cos);
+            
+            const newCanvas = document.createElement('canvas');
+            newCanvas.width = newWidth;
+            newCanvas.height = newHeight;
+            const ctx = newCanvas.getContext('2d');
+            
+            // Fill with white background
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, newWidth, newHeight);
+            
+            // Translate to center, rotate, then draw
+            ctx.translate(newWidth / 2, newHeight / 2);
+            ctx.rotate((degrees * Math.PI) / 180);
+            ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+            
+            // Crop to remove excessive white space
+            return cropWhiteSpace(newCanvas);
+        }
+
+        function cropWhiteSpace(canvas) {
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            let minX = canvas.width, minY = canvas.height;
+            let maxX = 0, maxY = 0;
+            
+            // Find bounding box of non-white pixels
+            for (let y = 0; y < canvas.height; y++) {
+                for (let x = 0; x < canvas.width; x++) {
+                    const idx = (y * canvas.width + x) * 4;
+                    const r = data[idx];
+                    const g = data[idx + 1];
+                    const b = data[idx + 2];
+                    
+                    // If pixel is not white (with some tolerance)
+                    if (r < 250 || g < 250 || b < 250) {
+                        minX = Math.min(minX, x);
+                        minY = Math.min(minY, y);
+                        maxX = Math.max(maxX, x);
+                        maxY = Math.max(maxY, y);
+                    }
+                }
+            }
+            
+            // Add padding
+            const padding = 10;
+            minX = Math.max(0, minX - padding);
+            minY = Math.max(0, minY - padding);
+            maxX = Math.min(canvas.width, maxX + padding);
+            maxY = Math.min(canvas.height, maxY + padding);
+            
+            const width = maxX - minX;
+            const height = maxY - minY;
+            
+            if (width <= 0 || height <= 0) return canvas;
+            
+            const croppedCanvas = document.createElement('canvas');
+            croppedCanvas.width = width;
+            croppedCanvas.height = height;
+            const croppedCtx = croppedCanvas.getContext('2d');
+            
+            croppedCtx.drawImage(canvas, minX, minY, width, height, 0, 0, width, height);
+            
+            return croppedCanvas;
         }
 
         function rotateCanvas(canvas, degrees) {

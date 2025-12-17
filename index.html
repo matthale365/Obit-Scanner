@@ -626,7 +626,10 @@
 
             let totalCards = 0;
             for (const file of files) {
+                showStatus(`📄 Detecting cards in ${file.name}...`, 'info');
                 const cards = await detectCards(file);
+                
+                showStatus(`🔄 Auto-rotating and straightening ${cards.length} card(s)...`, 'info');
                 uploadedCards.push(...cards);
                 totalCards += cards.length;
                 
@@ -941,30 +944,172 @@
             // Apply best 90-degree rotation to actual card
             if (bestRotation > 0) {
                 card.canvas = rotateCanvas(card.canvas, bestRotation * 90);
-                card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
                 card.rotated = true;
             }
             
             // Now deskew to straighten any remaining angle
             await deskewCard(card);
+            
+            // Update dataUrl after all rotations
+            card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
         }
 
         async function deskewCard(card) {
             try {
-                // Detect the skew angle using Tesseract
-                const result = await tesseractWorker.recognize(card.canvas);
+                // Use Tesseract to get orientation info
+                const result = await tesseractWorker.recognize(card.canvas, {
+                    rotateAuto: false // We'll handle rotation ourselves
+                });
                 
-                // Tesseract doesn't directly give us skew angle, so we'll detect it ourselves
-                const angle = detectSkewAngle(card.canvas);
+                // Try multiple methods to detect skew
+                let angle = 0;
                 
-                if (Math.abs(angle) > 0.5) { // Only deskew if angle is significant
+                // Method 1: Line-based detection
+                const lineAngle = detectSkewAngleFromLines(card.canvas);
+                
+                // Method 2: Projection-based detection  
+                const projectionAngle = detectSkewAngleFromProjection(card.canvas);
+                
+                // Use the angle with higher confidence
+                angle = Math.abs(lineAngle) > Math.abs(projectionAngle) ? lineAngle : projectionAngle;
+                
+                console.log(`Detected skew angle: ${angle.toFixed(2)}°`);
+                
+                if (Math.abs(angle) > 0.5 && Math.abs(angle) < 45) { // Only deskew if angle is significant but reasonable
                     card.canvas = rotateCanvasSmooth(card.canvas, -angle);
-                    card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
                     card.rotated = true;
                 }
             } catch (err) {
                 console.error('Deskew error:', err);
             }
+        }
+
+        function detectSkewAngleFromLines(canvas) {
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+
+            // Convert to grayscale and threshold
+            const binary = new Uint8ClampedArray(width * height);
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                binary[i / 4] = gray < 128 ? 0 : 255;
+            }
+
+            // Find horizontal lines
+            const angles = [];
+            const step = 5; // Sample every 5 pixels for speed
+            
+            for (let y = step; y < height - step; y += step) {
+                let lineStart = -1;
+                let linePixels = [];
+                
+                for (let x = 0; x < width; x++) {
+                    const idx = y * width + x;
+                    
+                    if (binary[idx] === 0) { // Black pixel (text)
+                        if (lineStart === -1) lineStart = x;
+                        linePixels.push(x);
+                    } else {
+                        if (linePixels.length > width * 0.1) { // Line is at least 10% of width
+                            // Calculate angle of this line
+                            const startX = linePixels[0];
+                            const endX = linePixels[linePixels.length - 1];
+                            
+                            // Look for vertical variation in the line
+                            let sumY = 0;
+                            let count = 0;
+                            for (let tx = startX; tx <= endX && tx < width; tx++) {
+                                for (let ty = y - 2; ty <= y + 2; ty++) {
+                                    if (ty >= 0 && ty < height && binary[ty * width + tx] === 0) {
+                                        sumY += ty;
+                                        count++;
+                                    }
+                                }
+                            }
+                            
+                            if (count > 0) {
+                                const avgY = sumY / count;
+                                const angle = Math.atan2(avgY - y, endX - startX) * 180 / Math.PI;
+                                if (Math.abs(angle) < 45) {
+                                    angles.push(angle);
+                                }
+                            }
+                        }
+                        lineStart = -1;
+                        linePixels = [];
+                    }
+                }
+            }
+
+            if (angles.length === 0) return 0;
+
+            // Return median angle
+            angles.sort((a, b) => a - b);
+            return angles[Math.floor(angles.length / 2)];
+        }
+
+        function detectSkewAngleFromProjection(canvas) {
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+
+            // Convert to grayscale
+            const gray = new Uint8ClampedArray(width * height);
+            for (let i = 0; i < data.length; i += 4) {
+                gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            }
+
+            // Try different angles and measure variance of horizontal projections
+            let bestAngle = 0;
+            let maxVariance = 0;
+
+            for (let testAngle = -10; testAngle <= 10; testAngle += 0.5) {
+                const variance = calculateProjectionVariance(gray, width, height, testAngle);
+                if (variance > maxVariance) {
+                    maxVariance = variance;
+                    bestAngle = testAngle;
+                }
+            }
+
+            return bestAngle;
+        }
+
+        function calculateProjectionVariance(gray, width, height, angle) {
+            const radians = angle * Math.PI / 180;
+            const cos = Math.cos(radians);
+            const sin = Math.sin(radians);
+
+            // Calculate horizontal projection histogram
+            const histogram = new Array(height).fill(0);
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    // Rotate point
+                    const centerX = width / 2;
+                    const centerY = height / 2;
+                    const dx = x - centerX;
+                    const dy = y - centerY;
+                    const rotatedY = Math.round(dy * cos - dx * sin + centerY);
+
+                    if (rotatedY >= 0 && rotatedY < height) {
+                        const idx = y * width + x;
+                        if (gray[idx] < 128) { // Dark pixel
+                            histogram[rotatedY]++;
+                        }
+                    }
+                }
+            }
+
+            // Calculate variance (higher variance = better alignment)
+            const mean = histogram.reduce((a, b) => a + b, 0) / histogram.length;
+            const variance = histogram.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / histogram.length;
+
+            return variance;
         }
 
         function detectSkewAngle(canvas) {

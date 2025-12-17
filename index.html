@@ -549,7 +549,7 @@
                 card.className = 'split-card';
                 card.innerHTML = `
                     <button class="delete-split-btn" onclick="deleteSplit('${rowId}', ${index})" title="Delete this obituary">×</button>
-                    <img src="${split.dataUrl}" alt="Obit ${index + 1}" />
+                    <img src="${split.dataUrl}" alt="Obit ${index + 1}" onclick="viewFullScan('${split.dataUrl}')" style="cursor: pointer;" title="Click to enlarge" />
                     <div class="split-card-label">Obituary ${index + 1}</div>
                 `;
                 splitsContainer.appendChild(card);
@@ -1002,20 +1002,38 @@
 
         function viewFullScan(imageUrl) {
             const modal = document.getElementById('scanModal');
-            const modalImg = document.getElementById('modalImage');
+            const modalContent = modal.querySelector('.modal-content');
             const container = document.getElementById('modalImageContainer');
             
-            modalImg.src = imageUrl;
+            // Reset modal to viewing mode
+            modalContent.innerHTML = `
+                <span class="close-modal" onclick="closeModal()">&times;</span>
+                <div class="modal-controls">
+                    <button class="btn btn-secondary" onclick="rotateModalImage()">⟳ Rotate</button>
+                    <button class="btn btn-secondary" onclick="zoomModalImage(1.2)">🔍+ Zoom In</button>
+                    <button class="btn btn-secondary" onclick="zoomModalImage(0.8)">🔍- Zoom Out</button>
+                    <button class="btn btn-secondary" onclick="resetModalImage()">↺ Reset</button>
+                </div>
+                <div class="modal-image-container" id="modalImageContainer">
+                    <img id="modalImage" class="modal-image" src="${imageUrl}" alt="Full Scan" />
+                </div>
+            `;
+            
             modalRotation = 0;
             modalZoom = 1;
-            updateModalTransform();
             modal.classList.add('active');
+            
+            // Re-setup drag and zoom after DOM update
+            setTimeout(() => setupModalInteractions(), 50);
+        }
 
-            // Remove old listeners if any
-            const newContainer = container.cloneNode(true);
-            container.parentNode.replaceChild(newContainer, container);
+        function setupModalInteractions() {
             const freshContainer = document.getElementById('modalImageContainer');
             const freshImg = document.getElementById('modalImage');
+            
+            if (!freshContainer || !freshImg) return;
+
+            updateModalTransform();
 
             // Add drag-to-scroll functionality
             let isDragging = false;
@@ -1032,19 +1050,22 @@
                 e.preventDefault();
             });
 
-            document.addEventListener('mousemove', (e) => {
+            const handleMouseMove = (e) => {
                 if (!isDragging) return;
                 e.preventDefault();
                 const dx = e.clientX - startX;
                 const dy = e.clientY - startY;
                 freshContainer.scrollLeft = scrollLeft - dx;
                 freshContainer.scrollTop = scrollTop - dy;
-            });
+            };
 
-            document.addEventListener('mouseup', () => {
+            const handleMouseUp = () => {
                 isDragging = false;
                 freshContainer.classList.remove('dragging');
-            });
+            };
+
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
 
             // Mouse wheel zoom
             freshContainer.addEventListener('wheel', (e) => {
@@ -1055,8 +1076,10 @@
         }
 
         function updateModalTransform() {
-            document.getElementById('modalImage').style.transform = 
-                `rotate(${modalRotation}deg) scale(${modalZoom})`;
+            const img = document.getElementById('modalImage');
+            if (img) {
+                img.style.transform = `rotate(${modalRotation}deg) scale(${modalZoom})`;
+            }
         }
 
         function closeModal() { document.getElementById('scanModal').classList.remove('active'); }

@@ -87,13 +87,75 @@
         .split-card {
             background: var(--bg-light); border-radius: 8px; padding: 10px;
             text-align: center; border: 2px solid transparent; transition: all 0.2s ease;
+            position: relative;
         }
         .split-card:hover { border-color: var(--accent-blue); transform: scale(1.02); }
+        .split-card:hover .delete-split-btn { opacity: 1; }
+        
+        .delete-split-btn {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: var(--accent-red);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 28px;
+            height: 28px;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+        .delete-split-btn:hover {
+            background: #dc2626;
+        }
+        
         .split-card img {
             width: 100%; height: 180px; object-fit: contain;
             border-radius: 4px; margin-bottom: 8px;
         }
         .split-card-label { font-size: 0.85rem; color: var(--text-secondary); }
+
+        .scan-row-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        /* Manual selection modal */
+        .selection-canvas-container {
+            position: relative;
+            display: inline-block;
+            max-width: 90vw;
+            max-height: 70vh;
+            overflow: auto;
+            background: var(--bg-dark);
+            border-radius: 8px;
+        }
+
+        .selection-box {
+            position: absolute;
+            border: 3px solid var(--accent-blue);
+            background: rgba(59, 130, 246, 0.2);
+            cursor: move;
+            min-width: 50px;
+            min-height: 50px;
+        }
+
+        .selection-box-handle {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: var(--accent-blue);
+            border: 2px solid white;
+        }
+        .handle-nw { top: -6px; left: -6px; cursor: nw-resize; }
+        .handle-ne { top: -6px; right: -6px; cursor: ne-resize; }
+        .handle-sw { bottom: -6px; left: -6px; cursor: sw-resize; }
+        .handle-se { bottom: -6px; right: -6px; cursor: se-resize; }
 
         .processing-indicator { text-align: center; padding: 20px; color: var(--text-secondary); }
 
@@ -142,6 +204,10 @@
             flex: 1; overflow: auto; background: var(--bg-medium);
             border-radius: 8px; padding: 20px; text-align: center;
             cursor: grab;
+            user-select: none; /* Prevent text selection while dragging */
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
             /* Hide scrollbars */
             scrollbar-width: none; /* Firefox */
             -ms-overflow-style: none; /* IE/Edge */
@@ -154,7 +220,9 @@
         }
 
         .modal-image {
-            max-width: 100%; height: auto; transform-origin: center center;
+            max-width: none; /* Allow dragging past edges */
+            height: auto; 
+            transform-origin: center center;
             pointer-events: none; /* Prevent image dragging */
         }
 
@@ -439,13 +507,23 @@
             row.innerHTML = `
                 <div class="scan-row-header">
                     <h3 style="margin: 0;">${filename}</h3>
-                    <span class="scan-status" style="color: var(--text-secondary);"></span>
+                    <div style="display: flex; gap: 12px; align-items: center;">
+                        <span class="scan-status" style="color: var(--text-secondary);"></span>
+                        <button class="btn btn-danger" onclick="deleteScan('${rowId}')" style="padding: 6px 12px; font-size: 0.85rem;">
+                            🗑 Delete Scan
+                        </button>
+                    </div>
                 </div>
                 <div class="scan-row-content">
                     <div class="scan-original">
                         <img src="${imageUrl}" alt="${filename}" onclick="viewFullScan('${imageUrl}')" title="Click to view full size" />
                     </div>
                     <div class="scan-splits" id="${rowId}-splits"></div>
+                </div>
+                <div class="scan-row-actions">
+                    <button class="btn btn-secondary" onclick="addManualSelection('${rowId}')" style="padding: 8px 16px; font-size: 0.9rem;">
+                        ➕ Add Missing Obituary
+                    </button>
                 </div>
             `;
             container.appendChild(row);
@@ -470,6 +548,7 @@
                 const card = document.createElement('div');
                 card.className = 'split-card';
                 card.innerHTML = `
+                    <button class="delete-split-btn" onclick="deleteSplit('${rowId}', ${index})" title="Delete this obituary">×</button>
                     <img src="${split.dataUrl}" alt="Obit ${index + 1}" />
                     <div class="split-card-label">Obituary ${index + 1}</div>
                 `;
@@ -929,42 +1008,55 @@
             modalImg.src = imageUrl;
             modalRotation = 0;
             modalZoom = 1;
-            modalImg.style.transform = `rotate(${modalRotation}deg) scale(${modalZoom})`;
+            updateModalTransform();
             modal.classList.add('active');
+
+            // Remove old listeners if any
+            const newContainer = container.cloneNode(true);
+            container.parentNode.replaceChild(newContainer, container);
+            const freshContainer = document.getElementById('modalImageContainer');
+            const freshImg = document.getElementById('modalImage');
 
             // Add drag-to-scroll functionality
             let isDragging = false;
             let startX, startY, scrollLeft, scrollTop;
 
-            container.addEventListener('mousedown', (e) => {
+            freshContainer.addEventListener('mousedown', (e) => {
+                if (e.target !== freshContainer && e.target !== freshImg) return;
                 isDragging = true;
-                container.classList.add('dragging');
-                startX = e.pageX - container.offsetLeft;
-                startY = e.pageY - container.offsetTop;
-                scrollLeft = container.scrollLeft;
-                scrollTop = container.scrollTop;
+                freshContainer.classList.add('dragging');
+                startX = e.clientX;
+                startY = e.clientY;
+                scrollLeft = freshContainer.scrollLeft;
+                scrollTop = freshContainer.scrollTop;
+                e.preventDefault();
             });
 
-            container.addEventListener('mouseleave', () => {
-                isDragging = false;
-                container.classList.remove('dragging');
-            });
-
-            container.addEventListener('mouseup', () => {
-                isDragging = false;
-                container.classList.remove('dragging');
-            });
-
-            container.addEventListener('mousemove', (e) => {
+            document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
                 e.preventDefault();
-                const x = e.pageX - container.offsetLeft;
-                const y = e.pageY - container.offsetTop;
-                const walkX = (x - startX) * 2; // Multiply for faster scrolling
-                const walkY = (y - startY) * 2;
-                container.scrollLeft = scrollLeft - walkX;
-                container.scrollTop = scrollTop - walkY;
+                const dx = e.clientX - startX;
+                const dy = e.clientY - startY;
+                freshContainer.scrollLeft = scrollLeft - dx;
+                freshContainer.scrollTop = scrollTop - dy;
             });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+                freshContainer.classList.remove('dragging');
+            });
+
+            // Mouse wheel zoom
+            freshContainer.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+                zoomModalImage(zoomFactor);
+            }, { passive: false });
+        }
+
+        function updateModalTransform() {
+            document.getElementById('modalImage').style.transform = 
+                `rotate(${modalRotation}deg) scale(${modalZoom})`;
         }
 
         function closeModal() { document.getElementById('scanModal').classList.remove('active'); }
@@ -995,10 +1087,257 @@
             }
         }
 
+        function deleteScan(rowId) {
+            if (!confirm('Delete this entire scan?')) return;
+            
+            const pageIndex = parseInt(rowId.replace('scan-row-', ''));
+            scannedPages.splice(pageIndex, 1);
+            
+            // Rebuild all rows
+            document.getElementById('scanRowsContainer').innerHTML = '';
+            scannedPages.forEach((page, idx) => {
+                const newRowId = `scan-row-${idx}`;
+                addScanRow(newRowId, page.originalImage, page.filename);
+                displaySplits(newRowId, page.splits);
+            });
+            
+            if (scannedPages.length === 0) {
+                document.getElementById('verifyControls').classList.add('hidden');
+                showStatus('', '');
+            } else {
+                showStatus(`✓ ${scannedPages.length} scan(s) remaining`, 'success');
+            }
+        }
+
+        function deleteSplit(rowId, splitIndex) {
+            const pageIndex = parseInt(rowId.replace('scan-row-', ''));
+            scannedPages[pageIndex].splits.splice(splitIndex, 1);
+            displaySplits(rowId, scannedPages[pageIndex].splits);
+        }
+
+        function addManualSelection(rowId) {
+            const pageIndex = parseInt(rowId.replace('scan-row-', ''));
+            const page = scannedPages[pageIndex];
+            
+            // Create modal for manual selection
+            const modal = document.getElementById('scanModal');
+            const modalContent = modal.querySelector('.modal-content');
+            
+            // Create canvas for selection
+            const img = new Image();
+            img.onload = () => {
+                modalContent.innerHTML = `
+                    <span class="close-modal" onclick="closeModal()">&times;</span>
+                    <div style="text-align: center; margin-bottom: 20px;">
+                        <h2 style="color: var(--text-primary); margin-bottom: 10px;">Select Missing Obituary</h2>
+                        <p style="color: var(--text-secondary);">Click and drag to create a selection box around the obituary</p>
+                    </div>
+                    <div class="selection-canvas-container" id="selectionContainer">
+                        <img src="${page.originalImage}" style="display: block; max-width: 100%;" id="selectImg" />
+                    </div>
+                    <div style="text-align: center; margin-top: 20px;">
+                        <button class="btn btn-secondary" onclick="closeModal()" style="margin-right: 10px;">Cancel</button>
+                        <button class="btn btn-success" onclick="saveManualSelection('${rowId}', ${pageIndex})" id="saveSelectionBtn" disabled>
+                            💾 Save Selection
+                        </button>
+                    </div>
+                `;
+                
+                modal.classList.add('active');
+                
+                // Add selection box functionality
+                const container = document.getElementById('selectionContainer');
+                const selectImg = document.getElementById('selectImg');
+                let selectionBox = null;
+                let isDrawing = false;
+                let startX, startY;
+                
+                container.addEventListener('mousedown', (e) => {
+                    if (e.target !== selectImg) return;
+                    
+                    const rect = selectImg.getBoundingClientRect();
+                    startX = e.clientX - rect.left;
+                    startY = e.clientY - rect.top;
+                    isDrawing = true;
+                    
+                    // Remove existing selection box
+                    if (selectionBox) selectionBox.remove();
+                    
+                    // Create new selection box
+                    selectionBox = document.createElement('div');
+                    selectionBox.className = 'selection-box';
+                    selectionBox.style.left = startX + 'px';
+                    selectionBox.style.top = startY + 'px';
+                    selectionBox.style.width = '0px';
+                    selectionBox.style.height = '0px';
+                    
+                    // Add resize handles
+                    ['nw', 'ne', 'sw', 'se'].forEach(pos => {
+                        const handle = document.createElement('div');
+                        handle.className = `selection-box-handle handle-${pos}`;
+                        selectionBox.appendChild(handle);
+                    });
+                    
+                    container.appendChild(selectionBox);
+                    document.getElementById('saveSelectionBtn').disabled = false;
+                });
+                
+                document.addEventListener('mousemove', (e) => {
+                    if (!isDrawing || !selectionBox) return;
+                    
+                    const rect = selectImg.getBoundingClientRect();
+                    const currentX = e.clientX - rect.left;
+                    const currentY = e.clientY - rect.top;
+                    
+                    const width = Math.abs(currentX - startX);
+                    const height = Math.abs(currentY - startY);
+                    const left = Math.min(startX, currentX);
+                    const top = Math.min(startY, currentY);
+                    
+                    selectionBox.style.left = left + 'px';
+                    selectionBox.style.top = top + 'px';
+                    selectionBox.style.width = width + 'px';
+                    selectionBox.style.height = height + 'px';
+                });
+                
+                document.addEventListener('mouseup', () => {
+                    isDrawing = false;
+                    
+                    // Make box draggable and resizable
+                    if (selectionBox) {
+                        makeBoxDraggable(selectionBox, container, selectImg);
+                    }
+                });
+            };
+            img.src = page.originalImage;
+        }
+
+        function makeBoxDraggable(box, container, img) {
+            let isDragging = false;
+            let isResizing = false;
+            let resizeHandle = null;
+            let startX, startY, startBoxX, startBoxY, startBoxW, startBoxH;
+            
+            box.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('selection-box-handle')) {
+                    isResizing = true;
+                    resizeHandle = e.target.className.split(' ')[1].replace('handle-', '');
+                } else if (e.target === box) {
+                    isDragging = true;
+                }
+                
+                startX = e.clientX;
+                startY = e.clientY;
+                startBoxX = parseInt(box.style.left);
+                startBoxY = parseInt(box.style.top);
+                startBoxW = parseInt(box.style.width);
+                startBoxH = parseInt(box.style.height);
+                e.stopPropagation();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    box.style.left = (startBoxX + dx) + 'px';
+                    box.style.top = (startBoxY + dy) + 'px';
+                } else if (isResizing) {
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    
+                    if (resizeHandle.includes('e')) {
+                        box.style.width = Math.max(50, startBoxW + dx) + 'px';
+                    }
+                    if (resizeHandle.includes('w')) {
+                        const newWidth = Math.max(50, startBoxW - dx);
+                        box.style.left = (startBoxX + startBoxW - newWidth) + 'px';
+                        box.style.width = newWidth + 'px';
+                    }
+                    if (resizeHandle.includes('s')) {
+                        box.style.height = Math.max(50, startBoxH + dy) + 'px';
+                    }
+                    if (resizeHandle.includes('n')) {
+                        const newHeight = Math.max(50, startBoxH - dy);
+                        box.style.top = (startBoxY + startBoxH - newHeight) + 'px';
+                        box.style.height = newHeight + 'px';
+                    }
+                }
+            });
+            
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+                isResizing = false;
+            });
+        }
+
+        async function saveManualSelection(rowId, pageIndex) {
+            const selectionBox = document.querySelector('.selection-box');
+            const selectImg = document.getElementById('selectImg');
+            
+            if (!selectionBox) return;
+            
+            const imgRect = selectImg.getBoundingClientRect();
+            const boxRect = selectionBox.getBoundingClientRect();
+            
+            // Calculate selection relative to actual image dimensions
+            const scaleX = selectImg.naturalWidth / imgRect.width;
+            const scaleY = selectImg.naturalHeight / imgRect.height;
+            
+            const x = (boxRect.left - imgRect.left) * scaleX;
+            const y = (boxRect.top - imgRect.top) * scaleY;
+            const w = boxRect.width * scaleX;
+            const h = boxRect.height * scaleY;
+            
+            // Extract the selected region
+            const img = new Image();
+            img.onload = async () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, x, y, w, h, 0, 0, w, h);
+                
+                const newSplit = {
+                    canvas: canvas,
+                    dataUrl: canvas.toDataURL('image/jpeg', 0.95),
+                    rotated: false,
+                    sourcePageIndex: pageIndex
+                };
+                
+                // Auto-rotate the new split
+                showStatus('🔄 Auto-rotating selection...', 'info');
+                await autoRotate(newSplit);
+                
+                // Add to splits
+                scannedPages[pageIndex].splits.push(newSplit);
+                displaySplits(rowId, scannedPages[pageIndex].splits);
+                
+                closeModal();
+                showStatus('✓ Manual selection added!', 'success');
+            };
+            img.src = scannedPages[pageIndex].originalImage;
+        }
+
         function showStatus(message, type) {
             const statusDiv = document.getElementById('statusMessage');
             if (!message) { statusDiv.innerHTML = ''; return; }
             statusDiv.innerHTML = `<div class="status-message ${type}">${message}</div>`;
+        }
+
+        function rotateModalImage() {
+            modalRotation = (modalRotation + 90) % 360;
+            updateModalTransform();
+        }
+
+        function zoomModalImage(factor) {
+            modalZoom = Math.max(0.5, Math.min(5, modalZoom * factor));
+            updateModalTransform();
+        }
+
+        function resetModalImage() {
+            modalRotation = 0;
+            modalZoom = 1;
+            updateModalTransform();
         }
     </script>
 </body>

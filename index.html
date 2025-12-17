@@ -141,10 +141,21 @@
         .modal-image-container {
             flex: 1; overflow: auto; background: var(--bg-medium);
             border-radius: 8px; padding: 20px; text-align: center;
+            cursor: grab;
+            /* Hide scrollbars */
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE/Edge */
+        }
+        .modal-image-container::-webkit-scrollbar {
+            display: none; /* Chrome/Safari */
+        }
+        .modal-image-container.dragging {
+            cursor: grabbing;
         }
 
         .modal-image {
             max-width: 100%; height: auto; transform-origin: center center;
+            pointer-events: none; /* Prevent image dragging */
         }
 
         .close-modal {
@@ -477,34 +488,180 @@
             const imageData = ctx.getImageData(0, 0, width, height);
             const data = imageData.data;
 
-            // Darken bright pixels for better detection
-            for (let i = 0; i < data.length; i += 4) {
-                if (data[i] > 240 && data[i+1] > 240 && data[i+2] > 240) {
-                    data[i] = data[i+1] = data[i+2] = 200;
-                }
-            }
-            ctx.putImageData(imageData, 0, 0);
-
+            // Create grayscale
             const gray = new Uint8ClampedArray(width * height);
             for (let i = 0; i < data.length; i += 4) {
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            const binary = adaptiveThreshold(gray, width, height);
-            const contours = findContours(binary, width, height);
+            // Enhanced adaptive threshold with better parameters
+            const binary = new Uint8ClampedArray(width * height);
+            const blockSize = 21; // Larger block for better local adaptation
+            const halfBlock = Math.floor(blockSize / 2);
 
-            const minArea = (width * height) * 0.03;
-            const validContours = contours.filter(c => c.area > minArea && (Math.max(c.w, c.h) / Math.min(c.w, c.h)) <= 10);
-            validContours.sort((a, b) => b.area - a.area);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let sum = 0, count = 0;
+                    for (let by = -halfBlock; by <= halfBlock; by++) {
+                        for (let bx = -halfBlock; bx <= halfBlock; bx++) {
+                            const ny = y + by, nx = x + bx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                sum += gray[ny * width + nx];
+                                count++;
+                            }
+                        }
+                    }
+                    const threshold = (sum / count) - 5; // More aggressive threshold
+                    binary[y * width + x] = gray[y * width + x] < threshold ? 255 : 0;
+                }
+            }
 
+            // Multiple iterations of morphological operations for better region connection
+            let morphed = binary.slice();
+            
+            // Dilate more aggressively to connect nearby text
+            for (let iter = 0; iter < 5; iter++) {
+                morphed = morphDilate(morphed, width, height, 5);
+            }
+            
+            // Then erode to clean up
+            for (let iter = 0; iter < 3; iter++) {
+                morphed = morphErode(morphed, width, height, 3);
+            }
+
+            // Find all contours
+            const visited = new Uint8ClampedArray(width * height);
+            const allContours = [];
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (morphed[y * width + x] === 255 && !visited[y * width + x]) {
+                        const stack = [[x, y]];
+                        let minX = x, maxX = x, minY = y, maxY = y;
+                        let pixelCount = 0;
+
+                        while (stack.length > 0) {
+                            const [cx, cy] = stack.pop();
+                            const idx = cy * width + cx;
+                            if (cx < 0 || cx >= width || cy < 0 || cy >= height || visited[idx] || morphed[idx] !== 255) continue;
+
+                            visited[idx] = 1;
+                            pixelCount++;
+                            minX = Math.min(minX, cx);
+                            maxX = Math.max(maxX, cx);
+                            minY = Math.min(minY, cy);
+                            maxY = Math.max(maxY, cy);
+
+                            stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+                        }
+
+                        const w = maxX - minX + 1, h = maxY - minY + 1;
+                        allContours.push({ x: minX, y: minY, w, h, area: w * h, pixelCount });
+                    }
+                }
+            }
+
+            console.log(`Found ${allContours.length} raw contours`);
+
+            // More intelligent filtering
+            const minArea = (width * height) * 0.02; // Lower threshold - 2% instead of 3%
+            const maxArea = (width * height) * 0.85; // Don't take nearly full-page contours
+            
+            let validContours = allContours.filter(c => {
+                // Area check
+                if (c.area < minArea || c.area > maxArea) return false;
+                
+                // Aspect ratio - allow more variation
+                const aspectRatio = Math.max(c.w, c.h) / Math.min(c.w, c.h);
+                if (aspectRatio > 15) return false; // Very elongated shapes
+                
+                // Density check - should have reasonable amount of actual pixels
+                const density = c.pixelCount / c.area;
+                if (density < 0.05) return false; // Too sparse
+                
+                return true;
+            });
+
+            console.log(`After filtering: ${validContours.length} valid contours`);
+
+            // Sort by Y position first (top to bottom), then X (left to right)
+            validContours.sort((a, b) => {
+                const yDiff = a.y - b.y;
+                if (Math.abs(yDiff) < height * 0.1) { // Same row
+                    return a.x - b.x;
+                }
+                return yDiff;
+            });
+
+            // Merge overlapping contours (common issue causing splits)
+            const merged = [];
+            for (const contour of validContours) {
+                let wasMerged = false;
+                
+                for (let i = 0; i < merged.length; i++) {
+                    const existing = merged[i];
+                    
+                    // Check for overlap
+                    const overlapX = Math.min(existing.x + existing.w, contour.x + contour.w) - Math.max(existing.x, contour.x);
+                    const overlapY = Math.min(existing.y + existing.h, contour.y + contour.h) - Math.max(existing.y, contour.y);
+                    
+                    if (overlapX > 0 && overlapY > 0) {
+                        // Significant overlap - merge them
+                        const overlapArea = overlapX * overlapY;
+                        const minAreaOfTwo = Math.min(existing.area, contour.area);
+                        
+                        if (overlapArea > minAreaOfTwo * 0.3) { // 30% overlap
+                            // Expand existing to include new contour
+                            const newMinX = Math.min(existing.x, contour.x);
+                            const newMinY = Math.min(existing.y, contour.y);
+                            const newMaxX = Math.max(existing.x + existing.w, contour.x + contour.w);
+                            const newMaxY = Math.max(existing.y + existing.h, contour.y + contour.h);
+                            
+                            merged[i] = {
+                                x: newMinX,
+                                y: newMinY,
+                                w: newMaxX - newMinX,
+                                h: newMaxY - newMinY,
+                                area: (newMaxX - newMinX) * (newMaxY - newMinY)
+                            };
+                            
+                            wasMerged = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (!wasMerged) {
+                    merged.push(contour);
+                }
+            }
+
+            console.log(`After merging: ${merged.length} contours`);
+
+            // Sort by area and take reasonable number
+            merged.sort((a, b) => b.area - a.area);
+            const finalContours = merged.slice(0, 8); // Increased from 6 to 8
+
+            if (finalContours.length === 0) {
+                console.log('No valid contours found, returning full image');
+                return [{
+                    canvas: sourceCanvas,
+                    dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+                    rotated: false,
+                    sourcePageIndex: pageIndex
+                }];
+            }
+
+            // Extract each card with padding
             const cards = [];
-            for (const c of validContours.slice(0, 6)) {
-                const x = Math.max(0, c.x - 10);
-                const y = Math.max(0, c.y - 10);
-                const w = Math.min(width - x, c.w + 20);
-                const h = Math.min(height - y, c.h + 20);
+            for (const c of finalContours) {
+                const padding = 15; // Slightly more padding
+                const x = Math.max(0, c.x - padding);
+                const y = Math.max(0, c.y - padding);
+                const w = Math.min(width - x, c.w + 2 * padding);
+                const h = Math.min(height - y, c.h + 2 * padding);
 
-                if (w > 0 && h > 0) {
+                if (w > 50 && h > 50) { // Minimum size check
                     const cardCanvas = document.createElement('canvas');
                     cardCanvas.width = w;
                     cardCanvas.height = h;
@@ -518,6 +675,7 @@
                 }
             }
 
+            console.log(`Returning ${cards.length} cards`);
             return cards.length > 0 ? cards : [{
                 canvas: sourceCanvas,
                 dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
@@ -526,56 +684,46 @@
             }];
         }
 
-        function adaptiveThreshold(gray, width, height) {
-            const binary = new Uint8ClampedArray(width * height);
+        function morphDilate(binary, width, height, kernelSize) {
+            const result = new Uint8ClampedArray(width * height);
+            const halfKernel = Math.floor(kernelSize / 2);
+
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
-                    let sum = 0, count = 0;
-                    for (let by = -5; by <= 5; by++) {
-                        for (let bx = -5; bx <= 5; bx++) {
-                            const ny = y + by, nx = x + bx;
+                    let maxVal = 0;
+                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                            const ny = y + ky, nx = x + kx;
                             if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                                sum += gray[ny * width + nx];
-                                count++;
+                                maxVal = Math.max(maxVal, binary[ny * width + nx]);
                             }
                         }
                     }
-                    binary[y * width + x] = gray[y * width + x] < (sum / count - 2) ? 255 : 0;
+                    result[y * width + x] = maxVal;
                 }
             }
-            return binary;
+            return result;
         }
 
-        function findContours(binary, width, height) {
-            const visited = new Uint8ClampedArray(width * height);
-            const contours = [];
+        function morphErode(binary, width, height, kernelSize) {
+            const result = new Uint8ClampedArray(width * height);
+            const halfKernel = Math.floor(kernelSize / 2);
 
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
-                    if (binary[y * width + x] === 255 && !visited[y * width + x]) {
-                        const stack = [[x, y]];
-                        let minX = x, maxX = x, minY = y, maxY = y;
-
-                        while (stack.length > 0) {
-                            const [cx, cy] = stack.pop();
-                            const idx = cy * width + cx;
-                            if (cx < 0 || cx >= width || cy < 0 || cy >= height || visited[idx] || binary[idx] !== 255) continue;
-
-                            visited[idx] = 1;
-                            minX = Math.min(minX, cx);
-                            maxX = Math.max(maxX, cx);
-                            minY = Math.min(minY, cy);
-                            maxY = Math.max(maxY, cy);
-
-                            stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+                    let minVal = 255;
+                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                            const ny = y + ky, nx = x + kx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                minVal = Math.min(minVal, binary[ny * width + nx]);
+                            }
                         }
-
-                        const w = maxX - minX + 1, h = maxY - minY + 1;
-                        contours.push({ x: minX, y: minY, w, h, area: w * h });
                     }
+                    result[y * width + x] = minVal;
                 }
             }
-            return contours;
+            return result;
         }
 
         async function autoRotate(card) {
@@ -776,11 +924,47 @@
         function viewFullScan(imageUrl) {
             const modal = document.getElementById('scanModal');
             const modalImg = document.getElementById('modalImage');
+            const container = document.getElementById('modalImageContainer');
+            
             modalImg.src = imageUrl;
             modalRotation = 0;
             modalZoom = 1;
             modalImg.style.transform = `rotate(${modalRotation}deg) scale(${modalZoom})`;
             modal.classList.add('active');
+
+            // Add drag-to-scroll functionality
+            let isDragging = false;
+            let startX, startY, scrollLeft, scrollTop;
+
+            container.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                container.classList.add('dragging');
+                startX = e.pageX - container.offsetLeft;
+                startY = e.pageY - container.offsetTop;
+                scrollLeft = container.scrollLeft;
+                scrollTop = container.scrollTop;
+            });
+
+            container.addEventListener('mouseleave', () => {
+                isDragging = false;
+                container.classList.remove('dragging');
+            });
+
+            container.addEventListener('mouseup', () => {
+                isDragging = false;
+                container.classList.remove('dragging');
+            });
+
+            container.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                e.preventDefault();
+                const x = e.pageX - container.offsetLeft;
+                const y = e.pageY - container.offsetTop;
+                const walkX = (x - startX) * 2; // Multiply for faster scrolling
+                const walkY = (y - startY) * 2;
+                container.scrollLeft = scrollLeft - walkX;
+                container.scrollTop = scrollTop - walkY;
+            });
         }
 
         function closeModal() { document.getElementById('scanModal').classList.remove('active'); }

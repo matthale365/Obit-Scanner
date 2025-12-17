@@ -998,30 +998,76 @@
 
             // Clean text for better matching
             const cleanedText = text.replace(/\s+/g, ' ').trim();
+            
+            // Split into lines for position-based extraction
+            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-            // 1. EXTRACT NAME
-            // Look for patterns like "John Smith", "SMITH, John", "John David Smith"
-            const namePatterns = [
-                // "LASTNAME, Firstname" format (common in obits)
-                /^([A-Z]{2,}),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/,
-                // "Firstname Lastname" at start
-                /^([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?)?\s+[A-Z][a-z]+)/,
-                // After common headers
-                /(?:obituary|memory|passing|death)\s+(?:of|for)?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?)?\s+[A-Z][a-z]+)/i,
-                // Before dates
-                /([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?)?\s+[A-Z][a-z]+),?\s+(?:age|aged|\d)/i
-            ];
-
-            for (const pattern of namePatterns) {
-                const match = cleanedText.match(pattern);
-                if (match) {
-                    // Handle "LASTNAME, Firstname" format
-                    if (match[0].includes(',')) {
-                        facts.name = `${match[2]} ${match[1]}`;
-                    } else {
-                        facts.name = match[1];
-                    }
+            // 1. EXTRACT NAME - PRIORITY: First few lines (where header typically is)
+            let nameFound = false;
+            
+            // Check first 3 lines for name in "LASTNAME, Firstname" or "Firstname Lastname" format
+            for (let i = 0; i < Math.min(3, lines.length); i++) {
+                const line = lines[i];
+                
+                // Skip lines that are clearly dates or too short
+                if (line.length < 5 || /^\d{1,2}[\/\-]/.test(line) || /^(?:January|February|March|April|May|June|July|August|September|October|November|December)/i.test(line)) {
+                    continue;
+                }
+                
+                // Pattern 1: "LASTNAME, Firstname Middle" (most common in obituary headers)
+                const lastFirstMatch = line.match(/^([A-Z][A-Z\s]+),\s+([A-Z][a-z]+(?:\s+[A-Z][a-z\.]*)*)/);
+                if (lastFirstMatch) {
+                    const lastName = lastFirstMatch[1].split(/\s+/).map(w => 
+                        w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+                    ).join(' ');
+                    facts.name = `${lastFirstMatch[2]} ${lastName}`;
+                    nameFound = true;
                     break;
+                }
+                
+                // Pattern 2: "Firstname Middle Lastname" at start (title case)
+                const firstLastMatch = line.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z\.]*)*\s+[A-Z][a-z]+)$/);
+                if (firstLastMatch && !line.includes(',')) {
+                    // Make sure it's not a date or common phrase
+                    const lowerLine = line.toLowerCase();
+                    if (!lowerLine.includes('obituary') && !lowerLine.includes('memory') && 
+                        !lowerLine.includes('service') && !lowerLine.includes('funeral')) {
+                        facts.name = firstLastMatch[1];
+                        nameFound = true;
+                        break;
+                    }
+                }
+                
+                // Pattern 3: All caps name (common in headers)
+                const allCapsMatch = line.match(/^([A-Z][A-Z\s]{5,50})$/);
+                if (allCapsMatch && !allCapsMatch[1].includes('DEATH') && !allCapsMatch[1].includes('OBITUAR')) {
+                    // Convert to title case
+                    facts.name = allCapsMatch[1].split(/\s+/).map(w => 
+                        w.charAt(0) + w.slice(1).toLowerCase()
+                    ).join(' ');
+                    nameFound = true;
+                    break;
+                }
+            }
+
+            // Fallback: If name not found in first lines, try body text patterns
+            if (!nameFound) {
+                const namePatterns = [
+                    // After common headers
+                    /(?:obituary|memory|passing|death)\s+(?:of|for)?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?)?\s+[A-Z][a-z]+)/i,
+                    // Before dates or age
+                    /([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?)?\s+[A-Z][a-z]+),?\s+(?:age|aged|\d)/i,
+                    // At start of text
+                    /^([A-Z][a-z]+(?:\s+[A-Z][a-z]*\.?)?\s+[A-Z][a-z]+)/
+                ];
+
+                for (const pattern of namePatterns) {
+                    const match = cleanedText.match(pattern);
+                    if (match) {
+                        facts.name = match[1];
+                        nameFound = true;
+                        break;
+                    }
                 }
             }
 
@@ -1041,29 +1087,36 @@
             }
 
             // 3. EXTRACT DATES
-            // Look for dates in various formats
+            // Look for dates in various formats - but exclude from first 3 lines if they look like standalone dates
             const datePatterns = [
                 /\b((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})/gi,
                 /\b(\d{1,2}\/\d{1,2}\/\d{2,4})/g,
-                /\b(\d{1,2}-\d{1,2}-\d{2,4})/g,
-                /\b([A-Z][a-z]+\s+\d{1,2},?\s+\d{4})/g
+                /\b(\d{1,2}-\d{1,2}-\d{2,4})/g
             ];
 
             let allDates = [];
             for (const pattern of datePatterns) {
                 const matches = cleanedText.matchAll(pattern);
                 for (const match of matches) {
-                    allDates.push(match[1]);
+                    // Skip if it looks like it's in the name section (first 50 chars)
+                    const position = cleanedText.indexOf(match[0]);
+                    if (position > 50) {  // Only consider dates after first 50 characters
+                        allDates.push(match[1]);
+                    }
                 }
             }
 
+            // Remove duplicates
+            allDates = [...new Set(allDates)];
+
             // Try to identify birth vs death dates by context
             const birthKeywords = /born|birth/i;
-            const deathKeywords = /died|death|passed|departed|entered.*rest/i;
+            const deathKeywords = /died|death|passed|departed|entered.*rest|age\s+\d+/i;
 
             for (const date of allDates) {
-                const beforeDate = cleanedText.substring(Math.max(0, cleanedText.indexOf(date) - 50), cleanedText.indexOf(date));
-                const afterDate = cleanedText.substring(cleanedText.indexOf(date), cleanedText.indexOf(date) + 50);
+                const position = cleanedText.indexOf(date);
+                const beforeDate = cleanedText.substring(Math.max(0, position - 50), position);
+                const afterDate = cleanedText.substring(position, Math.min(cleanedText.length, position + 50));
                 const context = beforeDate + afterDate;
 
                 if (birthKeywords.test(context) && facts.birth_date === 'Not mentioned') {
@@ -1073,44 +1126,45 @@
                 }
             }
 
-            // If we couldn't determine by context, assume first date is birth, second is death
+            // If we couldn't determine by context, assume chronological order
             if (facts.birth_date === 'Not mentioned' && facts.death_date === 'Not mentioned' && allDates.length >= 2) {
+                // Sort dates and assume oldest is birth, newest is death
                 facts.birth_date = allDates[0];
                 facts.death_date = allDates[1];
             } else if (facts.death_date === 'Not mentioned' && allDates.length >= 1) {
-                facts.death_date = allDates[0];
+                // If only one date, it's probably death date
+                facts.death_date = allDates[allDates.length - 1];
             }
 
             // 4. EXTRACT SPOUSE
             const spousePatterns = [
-                /(?:wife|husband|spouse|partner|married\s+to)\s+(?:of|to)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
+                /(?:wife|husband|spouse|partner|married\s+to)\s+(?:of|to)?\s*,?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
                 /(?:survived\s+by)\s+(?:his|her)\s+(?:wife|husband|spouse)\s*,?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
-                /(?:beloved|loving|devoted)\s+(?:wife|husband|spouse)\s+(?:of\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
-                /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:his|her)\s+(?:wife|husband|spouse)/i
+                /(?:beloved|loving|devoted)\s+(?:wife|husband|spouse)\s+(?:of\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i
             ];
 
             for (const pattern of spousePatterns) {
                 const match = cleanedText.match(pattern);
                 if (match && match[1] && match[1] !== facts.name) {
-                    facts.spouse = match[1];
+                    facts.spouse = match[1].trim();
                     break;
                 }
             }
 
             // 5. EXTRACT CHILDREN
             const childrenPatterns = [
-                /(?:children|son|daughter)[^.]*?([A-Z][^.;]{10,100})/i,
-                /survived\s+by[^.]*?(?:children|son|daughter)[^.]*?([A-Z][^.;]{10,100})/i
+                /(?:children|sons?|daughters?)[:\s,]*([A-Z][^.;]{10,150})/i,
+                /survived\s+by[^.]*?(?:children|sons?|daughters?)[:\s,]*([A-Z][^.;]{10,150})/i
             ];
 
             for (const pattern of childrenPatterns) {
                 const match = cleanedText.match(pattern);
                 if (match) {
-                    // Clean up the match
                     let children = match[1].trim();
-                    // Remove trailing stuff
-                    children = children.replace(/(?:and|his|her|their|other|also|many).*$/i, '').trim();
-                    if (children.length > 5 && children.length < 150) {
+                    // Clean up - stop at next category
+                    children = children.replace(/(?:and|;)\s*(?:grandchildren|siblings?|sisters?|brothers?|nieces?|nephews?).*$/i, '').trim();
+                    children = children.replace(/(?:he|she|his|her|their|also|many)\s+(?:is|was|were|are).*$/i, '').trim();
+                    if (children.length > 5 && children.length < 200) {
                         facts.children = children;
                         break;
                     }
@@ -1119,16 +1173,17 @@
 
             // 6. EXTRACT OTHER FAMILY
             const familyPatterns = [
-                /(?:grandchildren|grandson|granddaughter|niece|nephew|sister|brother|sibling)[^.]*?([A-Z][^.;]{10,100})/i,
-                /survived\s+by[^.]*?(?:grandchildren|sister|brother)[^.]*?([A-Z][^.;]{10,100})/i
+                /(?:grandchildren|grandsons?|granddaughters?)[:\s,]*([A-Z][^.;]{10,150})/i,
+                /(?:siblings?|sisters?|brothers?)[:\s,]*([A-Z][^.;]{10,150})/i,
+                /(?:nieces?|nephews?)[:\s,]*([A-Z][^.;]{10,150})/i
             ];
 
             for (const pattern of familyPatterns) {
                 const match = cleanedText.match(pattern);
                 if (match) {
                     let family = match[1].trim();
-                    family = family.replace(/(?:and|his|her|their|other|also|many|he|she|was|is).*$/i, '').trim();
-                    if (family.length > 5 && family.length < 150) {
+                    family = family.replace(/(?:he|she|his|her|their|also|many|and\s+many)\s+(?:is|was|were|are|other).*$/i, '').trim();
+                    if (family.length > 5 && family.length < 200) {
                         facts.other_family = family;
                         break;
                     }
@@ -1137,15 +1192,15 @@
 
             // 7. EXTRACT LOCATION
             const locationPatterns = [
-                /(?:of|from|resided?\s+in|lived\s+in)\s+([A-Z][a-z]+(?:,\s*[A-Z]{2})?)/,
+                /(?:of|from|resided?\s+in|lived\s+in)\s+([A-Z][a-z]+(?:,\s*[A-Z]{2})?(?:,\s*[A-Z][a-z]+)?)/i,
                 /([A-Z][a-z]+,\s*[A-Z]{2})/,  // City, ST format
-                /(?:funeral|service|burial)\s+(?:at|in)\s+([A-Z][^.]{5,50})/i
+                /(?:funeral|service|burial|visitation)\s+(?:at|in|will\s+be\s+held\s+at)\s+([A-Z][^.;]{10,60}?)(?:\.|;|on\s+\d)/i
             ];
 
             for (const pattern of locationPatterns) {
                 const match = cleanedText.match(pattern);
                 if (match) {
-                    facts.location = match[1];
+                    facts.location = match[1].trim();
                     break;
                 }
             }

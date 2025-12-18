@@ -689,9 +689,9 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Enhanced adaptive threshold with better parameters
+            // Enhanced adaptive threshold
             const binary = new Uint8ClampedArray(width * height);
-            const blockSize = 21; // Larger block for better local adaptation
+            const blockSize = 21;
             const halfBlock = Math.floor(blockSize / 2);
 
             for (let y = 0; y < height; y++) {
@@ -706,20 +706,23 @@
                             }
                         }
                     }
-                    const threshold = (sum / count) - 5; // More aggressive threshold
+                    const threshold = (sum / count) - 5;
                     binary[y * width + x] = gray[y * width + x] < threshold ? 255 : 0;
                 }
             }
 
-            // Multiple iterations of morphological operations for better region connection
-            let morphed = binary.slice();
+            // Remove vertical lines (borders/dividers) before morphology
+            const noLines = removeVerticalLines(binary, width, height);
+
+            // Multiple iterations of morphological operations
+            let morphed = noLines.slice();
             
-            // Dilate more aggressively to connect nearby text
+            // Dilate to connect nearby text
             for (let iter = 0; iter < 5; iter++) {
                 morphed = morphDilate(morphed, width, height, 5);
             }
             
-            // Then erode to clean up
+            // Erode to clean up
             for (let iter = 0; iter < 3; iter++) {
                 morphed = morphErode(morphed, width, height, 3);
             }
@@ -758,37 +761,47 @@
 
             console.log(`Found ${allContours.length} raw contours`);
 
-            // More intelligent filtering
-            const minArea = (width * height) * 0.02; // Lower threshold - 2% instead of 3%
-            const maxArea = (width * height) * 0.85; // Don't take nearly full-page contours
+            // Intelligent filtering
+            const minArea = (width * height) * 0.02;
+            const maxArea = (width * height) * 0.85;
             
             let validContours = allContours.filter(c => {
                 // Area check
                 if (c.area < minArea || c.area > maxArea) return false;
                 
-                // Aspect ratio - allow more variation
+                // Aspect ratio - allow reasonable variation
                 const aspectRatio = Math.max(c.w, c.h) / Math.min(c.w, c.h);
-                if (aspectRatio > 15) return false; // Very elongated shapes
+                if (aspectRatio > 15) return false;
                 
-                // Density check - should have reasonable amount of actual pixels
+                // Density check - should have reasonable text
                 const density = c.pixelCount / c.area;
-                if (density < 0.05) return false; // Too sparse
+                if (density < 0.05) return false;
+                
+                // Edge filter - ignore small regions near edges (handwritten labels)
+                const edgeMargin = Math.min(width, height) * 0.05; // 5% margin
+                const nearEdge = c.x < edgeMargin || c.y < edgeMargin || 
+                                (c.x + c.w) > (width - edgeMargin) || 
+                                (c.y + c.h) > (height - edgeMargin);
+                
+                if (nearEdge && c.area < minArea * 3) {
+                    return false; // Small regions near edges are likely labels
+                }
                 
                 return true;
             });
 
             console.log(`After filtering: ${validContours.length} valid contours`);
 
-            // Sort by Y position first (top to bottom), then X (left to right)
+            // Sort by position (top to bottom, left to right)
             validContours.sort((a, b) => {
                 const yDiff = a.y - b.y;
-                if (Math.abs(yDiff) < height * 0.1) { // Same row
+                if (Math.abs(yDiff) < height * 0.1) {
                     return a.x - b.x;
                 }
                 return yDiff;
             });
 
-            // Merge overlapping contours (common issue causing splits)
+            // Merge overlapping contours
             const merged = [];
             for (const contour of validContours) {
                 let wasMerged = false;
@@ -796,17 +809,14 @@
                 for (let i = 0; i < merged.length; i++) {
                     const existing = merged[i];
                     
-                    // Check for overlap
                     const overlapX = Math.min(existing.x + existing.w, contour.x + contour.w) - Math.max(existing.x, contour.x);
                     const overlapY = Math.min(existing.y + existing.h, contour.y + contour.h) - Math.max(existing.y, contour.y);
                     
                     if (overlapX > 0 && overlapY > 0) {
-                        // Significant overlap - merge them
                         const overlapArea = overlapX * overlapY;
                         const minAreaOfTwo = Math.min(existing.area, contour.area);
                         
-                        if (overlapArea > minAreaOfTwo * 0.3) { // 30% overlap
-                            // Expand existing to include new contour
+                        if (overlapArea > minAreaOfTwo * 0.3) {
                             const newMinX = Math.min(existing.x, contour.x);
                             const newMinY = Math.min(existing.y, contour.y);
                             const newMaxX = Math.max(existing.x + existing.w, contour.x + contour.w);
@@ -835,7 +845,7 @@
 
             // Sort by area and take reasonable number
             merged.sort((a, b) => b.area - a.area);
-            const finalContours = merged.slice(0, 8); // Increased from 6 to 8
+            const finalContours = merged.slice(0, 8);
 
             if (finalContours.length === 0) {
                 console.log('No valid contours found, returning full image');
@@ -847,23 +857,28 @@
                 }];
             }
 
-            // Extract each card with padding
+            // Extract each card with padding and trim whitespace
             const cards = [];
             for (const c of finalContours) {
-                const padding = 15; // Slightly more padding
+                const padding = 15;
                 const x = Math.max(0, c.x - padding);
                 const y = Math.max(0, c.y - padding);
                 const w = Math.min(width - x, c.w + 2 * padding);
                 const h = Math.min(height - y, c.h + 2 * padding);
 
-                if (w > 50 && h > 50) { // Minimum size check
+                if (w > 50 && h > 50) {
                     const cardCanvas = document.createElement('canvas');
                     cardCanvas.width = w;
                     cardCanvas.height = h;
-                    cardCanvas.getContext('2d').drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
+                    const cardCtx = cardCanvas.getContext('2d');
+                    cardCtx.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
+                    
+                    // Trim excessive whitespace
+                    const trimmedCanvas = trimWhitespace(cardCanvas);
+                    
                     cards.push({
-                        canvas: cardCanvas,
-                        dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
+                        canvas: trimmedCanvas,
+                        dataUrl: trimmedCanvas.toDataURL('image/jpeg', 0.95),
                         rotated: false,
                         sourcePageIndex: pageIndex
                     });
@@ -877,6 +892,92 @@
                 rotated: false,
                 sourcePageIndex: pageIndex
             }];
+        }
+
+        function removeVerticalLines(binary, width, height) {
+            const result = binary.slice();
+            const minLineLength = height * 0.3; // Lines must be at least 30% of image height
+            
+            // Scan each column
+            for (let x = 0; x < width; x++) {
+                let lineLength = 0;
+                let lineStart = -1;
+                
+                for (let y = 0; y < height; y++) {
+                    if (binary[y * width + x] === 255) {
+                        if (lineStart === -1) lineStart = y;
+                        lineLength++;
+                    } else {
+                        // Check if we found a long vertical line
+                        if (lineLength > minLineLength) {
+                            // Erase it (make it white/0)
+                            for (let ly = lineStart; ly < lineStart + lineLength; ly++) {
+                                result[ly * width + x] = 0;
+                            }
+                        }
+                        lineLength = 0;
+                        lineStart = -1;
+                    }
+                }
+                
+                // Check at end of column
+                if (lineLength > minLineLength) {
+                    for (let ly = lineStart; ly < lineStart + lineLength; ly++) {
+                        result[ly * width + x] = 0;
+                    }
+                }
+            }
+            
+            return result;
+        }
+
+        function trimWhitespace(canvas) {
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            let minX = canvas.width, maxX = 0;
+            let minY = canvas.height, maxY = 0;
+            
+            // Find bounds of non-white pixels
+            for (let y = 0; y < canvas.height; y++) {
+                for (let x = 0; x < canvas.width; x++) {
+                    const i = (y * canvas.width + x) * 4;
+                    const r = data[i], g = data[i + 1], b = data[i + 2];
+                    
+                    // Consider pixel non-white if it's not very bright
+                    if (r < 240 || g < 240 || b < 240) {
+                        minX = Math.min(minX, x);
+                        maxX = Math.max(maxX, x);
+                        minY = Math.min(minY, y);
+                        maxY = Math.max(maxY, y);
+                    }
+                }
+            }
+            
+            // Add small padding back
+            const padding = 10;
+            minX = Math.max(0, minX - padding);
+            minY = Math.max(0, minY - padding);
+            maxX = Math.min(canvas.width - 1, maxX + padding);
+            maxY = Math.min(canvas.height - 1, maxY + padding);
+            
+            const trimmedWidth = maxX - minX + 1;
+            const trimmedHeight = maxY - minY + 1;
+            
+            // Don't trim if it would make it too small
+            if (trimmedWidth < 50 || trimmedHeight < 50) {
+                return canvas;
+            }
+            
+            // Create trimmed canvas
+            const trimmedCanvas = document.createElement('canvas');
+            trimmedCanvas.width = trimmedWidth;
+            trimmedCanvas.height = trimmedHeight;
+            const trimmedCtx = trimmedCanvas.getContext('2d');
+            trimmedCtx.drawImage(canvas, minX, minY, trimmedWidth, trimmedHeight, 0, 0, trimmedWidth, trimmedHeight);
+            
+            return trimmedCanvas;
         }
 
         function morphDilate(binary, width, height, kernelSize) {

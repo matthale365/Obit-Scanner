@@ -689,74 +689,45 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // INVERTED APPROACH: Make white background black, keep text white
-            // This makes text regions (obituaries) stand out as white blobs
-            const binary = new Uint8ClampedArray(width * height);
-            const whiteThreshold = 220; // Pixels brighter than this become black (background)
-            const tolerance = 5;
-
-            for (let i = 0; i < gray.length; i++) {
-                // If pixel is bright (white background), make it black
-                // If pixel is dark (text/content), make it white
-                if (gray[i] >= whiteThreshold - tolerance) {
-                    binary[i] = 0; // Black background
-                } else {
-                    binary[i] = 255; // White text/content
-                }
-            }
-
-            // Fill in text regions with morphological operations
-            let morphed = binary.slice();
+            // Edge detection - find borders/rectangles
+            const edges = detectEdges(gray, width, height);
             
-            // Heavy dilation to connect all text in each obituary into one blob
-            for (let iter = 0; iter < 8; iter++) {
-                morphed = morphDilate(morphed, width, height, 7);
-            }
+            // Find horizontal and vertical lines
+            const horizontalLines = findHorizontalLines(edges, width, height);
+            const verticalLines = findVerticalLines(edges, width, height);
             
-            // Light erosion to clean edges
-            for (let iter = 0; iter < 2; iter++) {
-                morphed = morphErode(morphed, width, height, 3);
-            }
-
-            // Find contours (white blobs = obituaries)
-            const visited = new Uint8ClampedArray(width * height);
-            const allContours = [];
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    if (morphed[y * width + x] === 255 && !visited[y * width + x]) {
-                        const contour = floodFillContour(morphed, visited, width, height, x, y);
-                        if (contour) {
-                            allContours.push(contour);
-                        }
-                    }
-                }
-            }
-
-            console.log(`Found ${allContours.length} raw contours`);
-
-            // Filter contours
-            const minArea = (width * height) * 0.015; // 1.5% of image
-            const maxArea = (width * height) * 0.90; // Not entire page
+            console.log(`Found ${horizontalLines.length} horizontal lines, ${verticalLines.length} vertical lines`);
             
-            let validContours = allContours.filter(c => {
-                if (c.area < minArea || c.area > maxArea) return false;
+            // Find rectangles formed by intersecting lines
+            const rectangles = findRectangles(horizontalLines, verticalLines, width, height);
+            
+            console.log(`Found ${rectangles.length} potential rectangles`);
+
+            // Filter rectangles to likely obituaries
+            const minArea = (width * height) * 0.01; // 1% of image
+            const maxArea = (width * height) * 0.80;
+            
+            let validRects = rectangles.filter(r => {
+                if (r.area < minArea || r.area > maxArea) return false;
                 
-                // Aspect ratio check
-                const aspectRatio = Math.max(c.w, c.h) / Math.min(c.w, c.h);
-                if (aspectRatio > 20) return false; // Very elongated
+                const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
+                if (aspectRatio > 25) return false; // Too elongated
                 
-                // Density - should be reasonably filled
-                const density = c.pixelCount / c.area;
-                if (density < 0.03) return false;
+                if (r.w < 80 || r.h < 80) return false; // Too small
                 
                 return true;
             });
 
-            console.log(`After filtering: ${validContours.length} valid contours`);
+            console.log(`After filtering: ${validRects.length} valid rectangles`);
+
+            // If rectangle detection didn't work well, fall back to blob detection
+            if (validRects.length === 0) {
+                console.log('No rectangles found, falling back to blob detection');
+                return findCardsByBlobs(sourceCanvas, pageIndex, gray, width, height);
+            }
 
             // Sort by position
-            validContours.sort((a, b) => {
+            validRects.sort((a, b) => {
                 const yDiff = a.y - b.y;
                 if (Math.abs(yDiff) < height * 0.15) {
                     return a.x - b.x;
@@ -764,27 +735,27 @@
                 return yDiff;
             });
 
-            // Merge overlapping
+            // Merge very overlapping rectangles
             const merged = [];
-            for (const contour of validContours) {
+            for (const rect of validRects) {
                 let wasMerged = false;
                 
                 for (let i = 0; i < merged.length; i++) {
                     const existing = merged[i];
                     
-                    const overlapX = Math.min(existing.x + existing.w, contour.x + contour.w) - Math.max(existing.x, contour.x);
-                    const overlapY = Math.min(existing.y + existing.h, contour.y + contour.h) - Math.max(existing.y, contour.y);
+                    const overlapX = Math.min(existing.x + existing.w, rect.x + rect.w) - Math.max(existing.x, rect.x);
+                    const overlapY = Math.min(existing.y + existing.h, rect.y + rect.h) - Math.max(existing.y, rect.y);
                     
                     if (overlapX > 0 && overlapY > 0) {
                         const overlapArea = overlapX * overlapY;
-                        const minAreaOfTwo = Math.min(existing.area, contour.area);
+                        const smallerArea = Math.min(existing.area, rect.area);
                         
-                        // More aggressive merging - 20% overlap
-                        if (overlapArea > minAreaOfTwo * 0.2) {
-                            const newMinX = Math.min(existing.x, contour.x);
-                            const newMinY = Math.min(existing.y, contour.y);
-                            const newMaxX = Math.max(existing.x + existing.w, contour.x + contour.w);
-                            const newMaxY = Math.max(existing.y + existing.h, contour.y + contour.h);
+                        // Only merge if >50% overlap (conservative)
+                        if (overlapArea > smallerArea * 0.5) {
+                            const newMinX = Math.min(existing.x, rect.x);
+                            const newMinY = Math.min(existing.y, rect.y);
+                            const newMaxX = Math.max(existing.x + existing.w, rect.x + rect.w);
+                            const newMaxY = Math.max(existing.y + existing.h, rect.y + rect.h);
                             
                             merged[i] = {
                                 x: newMinX,
@@ -801,27 +772,229 @@
                 }
                 
                 if (!wasMerged) {
-                    merged.push(contour);
+                    merged.push(rect);
                 }
             }
 
-            console.log(`After merging: ${merged.length} contours`);
+            console.log(`After merging: ${merged.length} rectangles`);
 
-            // Take top contours by area
+            // Take largest rectangles
             merged.sort((a, b) => b.area - a.area);
-            const finalContours = merged.slice(0, 10); // Get up to 10
+            const finalRects = merged.slice(0, 10);
 
-            if (finalContours.length === 0) {
-                console.log('No valid contours found, returning full image');
-                return [{
-                    canvas: sourceCanvas,
-                    dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+            // Extract cards
+            const cards = [];
+            for (const r of finalRects) {
+                const padding = 10;
+                const x = Math.max(0, r.x - padding);
+                const y = Math.max(0, r.y - padding);
+                const w = Math.min(width - x, r.w + 2 * padding);
+                const h = Math.min(height - y, r.h + 2 * padding);
+
+                const cardCanvas = document.createElement('canvas');
+                cardCanvas.width = w;
+                cardCanvas.height = h;
+                cardCanvas.getContext('2d').drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
+                
+                cards.push({
+                    canvas: cardCanvas,
+                    dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
                     rotated: false,
                     sourcePageIndex: pageIndex
-                }];
+                });
             }
 
-            // Extract each card
+            console.log(`Returning ${cards.length} cards`);
+            return cards.length > 0 ? cards : [{
+                canvas: sourceCanvas,
+                dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+                rotated: false,
+                sourcePageIndex: pageIndex
+            }];
+        }
+
+        function detectEdges(gray, width, height) {
+            // Simple Sobel edge detection
+            const edges = new Uint8ClampedArray(width * height);
+            
+            for (let y = 1; y < height - 1; y++) {
+                for (let x = 1; x < width - 1; x++) {
+                    const gx = 
+                        -gray[(y-1)*width + x-1] + gray[(y-1)*width + x+1] +
+                        -2*gray[y*width + x-1] + 2*gray[y*width + x+1] +
+                        -gray[(y+1)*width + x-1] + gray[(y+1)*width + x+1];
+                    
+                    const gy = 
+                        -gray[(y-1)*width + x-1] - 2*gray[(y-1)*width + x] - gray[(y-1)*width + x+1] +
+                        gray[(y+1)*width + x-1] + 2*gray[(y+1)*width + x] + gray[(y+1)*width + x+1];
+                    
+                    const magnitude = Math.sqrt(gx*gx + gy*gy);
+                    edges[y*width + x] = magnitude > 30 ? 255 : 0;
+                }
+            }
+            
+            return edges;
+        }
+
+        function findHorizontalLines(edges, width, height) {
+            const lines = [];
+            const minLineLength = width * 0.15; // At least 15% of width
+            
+            for (let y = 0; y < height; y++) {
+                let lineStart = -1;
+                let lineLength = 0;
+                
+                for (let x = 0; x < width; x++) {
+                    if (edges[y * width + x] === 255) {
+                        if (lineStart === -1) lineStart = x;
+                        lineLength++;
+                    } else {
+                        if (lineLength > minLineLength) {
+                            lines.push({ y: y, x1: lineStart, x2: lineStart + lineLength });
+                        }
+                        lineStart = -1;
+                        lineLength = 0;
+                    }
+                }
+                
+                if (lineLength > minLineLength) {
+                    lines.push({ y: y, x1: lineStart, x2: lineStart + lineLength });
+                }
+            }
+            
+            return lines;
+        }
+
+        function findVerticalLines(edges, width, height) {
+            const lines = [];
+            const minLineLength = height * 0.15; // At least 15% of height
+            
+            for (let x = 0; x < width; x++) {
+                let lineStart = -1;
+                let lineLength = 0;
+                
+                for (let y = 0; y < height; y++) {
+                    if (edges[y * width + x] === 255) {
+                        if (lineStart === -1) lineStart = y;
+                        lineLength++;
+                    } else {
+                        if (lineLength > minLineLength) {
+                            lines.push({ x: x, y1: lineStart, y2: lineStart + lineLength });
+                        }
+                        lineStart = -1;
+                        lineLength = 0;
+                    }
+                }
+                
+                if (lineLength > minLineLength) {
+                    lines.push({ x: x, y1: lineStart, y2: lineStart + lineLength });
+                }
+            }
+            
+            return lines;
+        }
+
+        function findRectangles(hLines, vLines, width, height) {
+            const rectangles = [];
+            const tolerance = 20; // pixels
+            
+            // Group similar horizontal lines
+            const hGroups = groupLines(hLines.map(l => l.y), tolerance);
+            const vGroups = groupLines(vLines.map(l => l.x), tolerance);
+            
+            // Find rectangles from line intersections
+            for (let i = 0; i < hGroups.length - 1; i++) {
+                for (let j = i + 1; j < hGroups.length; j++) {
+                    const top = hGroups[i];
+                    const bottom = hGroups[j];
+                    
+                    for (let k = 0; k < vGroups.length - 1; k++) {
+                        for (let l = k + 1; l < vGroups.length; l++) {
+                            const left = vGroups[k];
+                            const right = vGroups[l];
+                            
+                            const w = right - left;
+                            const h = bottom - top;
+                            
+                            if (w > 50 && h > 50) {
+                                rectangles.push({
+                                    x: left,
+                                    y: top,
+                                    w: w,
+                                    h: h,
+                                    area: w * h
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return rectangles;
+        }
+
+        function groupLines(positions, tolerance) {
+            if (positions.length === 0) return [];
+            
+            positions.sort((a, b) => a - b);
+            const groups = [positions[0]];
+            
+            for (let i = 1; i < positions.length; i++) {
+                const last = groups[groups.length - 1];
+                if (positions[i] - last > tolerance) {
+                    groups.push(positions[i]);
+                }
+            }
+            
+            return groups;
+        }
+
+        // Fallback blob detection
+        function findCardsByBlobs(sourceCanvas, pageIndex, gray, width, height) {
+            console.log('Using fallback blob detection');
+            
+            const binary = new Uint8ClampedArray(width * height);
+            const whiteThreshold = 220;
+            
+            for (let i = 0; i < gray.length; i++) {
+                binary[i] = gray[i] >= whiteThreshold ? 0 : 255;
+            }
+
+            let morphed = binary.slice();
+            for (let iter = 0; iter < 8; iter++) {
+                morphed = morphDilate(morphed, width, height, 7);
+            }
+            for (let iter = 0; iter < 2; iter++) {
+                morphed = morphErode(morphed, width, height, 3);
+            }
+
+            const visited = new Uint8ClampedArray(width * height);
+            const allContours = [];
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (morphed[y * width + x] === 255 && !visited[y * width + x]) {
+                        const contour = floodFillContour(morphed, visited, width, height, x, y);
+                        if (contour) allContours.push(contour);
+                    }
+                }
+            }
+
+            const minArea = (width * height) * 0.015;
+            const maxArea = (width * height) * 0.90;
+            
+            let validContours = allContours.filter(c => {
+                if (c.area < minArea || c.area > maxArea) return false;
+                const aspectRatio = Math.max(c.w, c.h) / Math.min(c.w, c.h);
+                if (aspectRatio > 20) return false;
+                const density = c.pixelCount / c.area;
+                if (density < 0.03) return false;
+                return true;
+            });
+
+            validContours.sort((a, b) => b.area - a.area);
+            const finalContours = validContours.slice(0, 10);
+
             const cards = [];
             for (const c of finalContours) {
                 const padding = 20;
@@ -845,7 +1018,6 @@
                 }
             }
 
-            console.log(`Returning ${cards.length} cards`);
             return cards.length > 0 ? cards : [{
                 canvas: sourceCanvas,
                 dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),

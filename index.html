@@ -396,16 +396,21 @@
                     Drag and drop files here, or click to browse
                 </p>
                 <input type="file" id="fileInput" accept="image/*" multiple />
-                <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
-                    <span>📷</span> Select Images
-                </button>
+                <div style="display: flex; gap: 12px; justify-content: center; align-items: center;">
+                    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                        <span>📷</span> Select Images
+                    </button>
+                    <button class="btn btn-secondary" onclick="clearAllScans()" id="clearAllTopBtn" style="display: none; padding: 10px 20px; font-size: 0.9rem; opacity: 0.7;">
+                        🗑 Clear All
+                    </button>
+                </div>
             </div>
 
             <div id="statusMessage"></div>
             <div id="scanRowsContainer"></div>
 
             <div class="controls hidden" id="verifyControls">
-                <button class="btn btn-danger" onclick="clearAll()">🗑 Clear All</button>
+                <button class="btn btn-danger" onclick="clearAllScans()">🗑 Clear All</button>
                 <button class="btn btn-success" onclick="startExtraction()">🚀 Extract Text from All Obituaries</button>
             </div>
         </div>
@@ -537,42 +542,72 @@
 
             showStatus(`📄 Loading ${files.length} scan(s)...`, 'info');
 
+            // STEP 1: Instantly show all scans first
+            const pendingScans = [];
             for (let i = 0; i < files.length; i++) {
-                await processScan(files[i], i);
+                const file = files[i];
+                const pageIndex = scannedPages.length + i;
+                const rowId = `scan-row-${pageIndex}`;
+                
+                // Load image data
+                const imageData = await loadImageFile(file);
+                
+                // Add row immediately with "Processing..." message
+                addScanRow(rowId, imageData.dataUrl, file.name);
+                showScanProcessing(rowId);
+                
+                // Store for batch processing
+                pendingScans.push({
+                    rowId,
+                    pageIndex,
+                    file,
+                    imageData
+                });
             }
 
-            showStatus(`✓ All scans loaded. Review the splits below.`, 'success');
+            showStatus(`✓ ${files.length} scan(s) loaded. Detecting obituaries...`, 'info');
+
+            // STEP 2: Process all splits in batch
+            for (const scan of pendingScans) {
+                const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
+                
+                // Auto-rotate each split
+                for (let split of splits) {
+                    await autoRotate(split);
+                }
+
+                // Store page data
+                scannedPages.push({
+                    originalImage: scan.imageData.dataUrl,
+                    filename: scan.file.name,
+                    splits: splits
+                });
+
+                // Display splits
+                displaySplits(scan.rowId, splits);
+            }
+
+            showStatus(`✓ All scans processed. Review the splits below.`, 'success');
             document.getElementById('verifyControls').classList.remove('hidden');
+            document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
         }
 
-        async function processScan(file, pageIndex) {
+        async function loadImageFile(file) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
-                reader.onload = async (e) => {
+                reader.onload = (e) => {
                     const img = new Image();
-                    img.onload = async () => {
-                        const originalDataUrl = e.target.result;
+                    img.onload = () => {
                         const canvas = document.createElement('canvas');
                         const ctx = canvas.getContext('2d');
                         canvas.width = img.width;
                         canvas.height = img.height;
                         ctx.drawImage(img, 0, 0);
-
-                        const rowId = `scan-row-${scannedPages.length}`;
-                        addScanRow(rowId, originalDataUrl, file.name);
-                        showScanProcessing(rowId);
                         
-                        const splits = await findCards(canvas, scannedPages.length);
-                        for (let split of splits) await autoRotate(split);
-
-                        scannedPages.push({
-                            originalImage: originalDataUrl,
-                            filename: file.name,
-                            splits: splits
+                        resolve({
+                            dataUrl: e.target.result,
+                            canvas: canvas
                         });
-
-                        displaySplits(rowId, splits);
-                        resolve();
                     };
                     img.src = e.target.result;
                 };
@@ -1400,12 +1435,13 @@
             document.getElementById('modalImage').style.transform = 'rotate(0deg) scale(1)';
         }
 
-        function clearAll() {
+        function clearAllScans() {
             if (confirm('Clear all scans and start over?')) {
                 scannedPages = [];
                 allObituaries = [];
                 document.getElementById('scanRowsContainer').innerHTML = '';
                 document.getElementById('verifyControls').classList.add('hidden');
+                document.getElementById('clearAllTopBtn').style.display = 'none';
                 showStatus('', '');
             }
         }
@@ -1426,6 +1462,7 @@
             
             if (scannedPages.length === 0) {
                 document.getElementById('verifyControls').classList.add('hidden');
+                document.getElementById('clearAllTopBtn').style.display = 'none';
                 showStatus('', '');
             } else {
                 showStatus(`✓ ${scannedPages.length} scan(s) remaining`, 'success');

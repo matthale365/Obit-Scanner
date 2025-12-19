@@ -691,34 +691,11 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Try multiple detection methods
-            const methods = [
-                () => detectByContoursWithGaps(gray, width, height),
-                () => detectByProjection(gray, width, height),
-                () => detectByAdaptiveThreshold(gray, width, height)
-            ];
-
-            let allResults = [];
+            // Detect obituaries
+            const regions = detectObituaries(gray, width, height);
             
-            for (let i = 0; i < methods.length; i++) {
-                console.log(`\nMethod ${i + 1}:`);
-                const result = methods[i]();
-                if (result && result.length > 0) {
-                    // Validate regions have substantial content
-                    const validated = validateRegionContent(result, gray, width, height);
-                    if (validated.length > 0) {
-                        allResults.push({
-                            method: i + 1,
-                            regions: validated,
-                            score: scoreDetectionResult(validated, width, height)
-                        });
-                    }
-                }
-            }
-
-            // Pick best result
-            if (allResults.length === 0) {
-                console.log('No detections found, returning full image');
+            if (regions.length === 0) {
+                console.log('No obituaries detected, returning full image');
                 return [{
                     canvas: sourceCanvas,
                     dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
@@ -727,15 +704,13 @@
                 }];
             }
 
-            allResults.sort((a, b) => b.score - a.score);
-            const best = allResults[0];
-            console.log(`\nBest method: #${best.method} (score: ${best.score.toFixed(2)})`);
-            console.log(`Found ${best.regions.length} obituaries`);
+            console.log(`\n✓ Final result: ${regions.length} obituaries detected`);
 
             // Extract cards
             const cards = [];
-            for (const region of best.regions) {
-                const padding = 15;
+            for (let i = 0; i < regions.length; i++) {
+                const region = regions[i];
+                const padding = 20;
                 const x = Math.max(0, region.x - padding);
                 const y = Math.max(0, region.y - padding);
                 const w = Math.min(width - x, region.w + 2 * padding);
@@ -745,6 +720,8 @@
                 cardCanvas.width = w;
                 cardCanvas.height = h;
                 cardCanvas.getContext('2d').drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
+                
+                console.log(`  Obit ${i+1}: ${w}x${h} at (${x}, ${y})`);
                 
                 cards.push({
                     canvas: cardCanvas,
@@ -757,321 +734,164 @@
             return cards;
         }
 
-        // Validate that regions contain substantial content, not just faint lines or labels
-        function validateRegionContent(regions, gray, width, height) {
-            console.log(`\n  Validating ${regions.length} regions for substantial content...`);
+        function detectObituaries(gray, width, height) {
+            console.log('Detecting obituaries...');
             
-            const validated = [];
+            // Threshold for detecting text
+            const textThreshold = 170;
             
-            for (const region of regions) {
-                // Sample pixels throughout the region
-                let darkPixels = 0;
-                let veryDarkPixels = 0;
-                let totalSampled = 0;
-                
-                // Sample every 5 pixels in a grid
-                for (let y = region.y; y < region.y + region.h; y += 5) {
-                    for (let x = region.x; x < region.x + region.w; x += 5) {
-                        if (x >= width || y >= height) continue;
-                        
-                        const pixelValue = gray[y * width + x];
-                        totalSampled++;
-                        
-                        if (pixelValue < 200) darkPixels++; // Somewhat dark
-                        if (pixelValue < 150) veryDarkPixels++; // Actually dark (text)
-                    }
-                }
-                
-                const darkRatio = darkPixels / totalSampled;
-                const veryDarkRatio = veryDarkPixels / totalSampled;
-                
-                // Check for substantial text content
-                // Obituaries should have at least 8% very dark pixels (actual text)
-                // and at least 15% dark pixels overall
-                const hasSubstantialText = veryDarkRatio > 0.08 && darkRatio > 0.15;
-                
-                // Additional check: not mostly whitespace
-                const notMostlyWhite = darkRatio < 0.95;
-                
-                // Check for edge-only content (faint borders, no interior content)
-                const hasInteriorContent = checkInteriorContent(region, gray, width, height);
-                
-                console.log(`    Region ${region.w}x${region.h}: dark=${(darkRatio*100).toFixed(1)}% veryDark=${(veryDarkRatio*100).toFixed(1)}% interior=${hasInteriorContent}`);
-                
-                if (hasSubstantialText && notMostlyWhite && hasInteriorContent) {
-                    validated.push(region);
-                    console.log(`      ✓ VALID`);
-                } else {
-                    const reasons = [];
-                    if (!hasSubstantialText) reasons.push('insufficient text');
-                    if (!notMostlyWhite) reasons.push('mostly white');
-                    if (!hasInteriorContent) reasons.push('no interior content');
-                    console.log(`      ✗ REJECTED: ${reasons.join(', ')}`);
-                }
-            }
+            // Create density map (how much text in each region)
+            const blockSize = 40; // Check in 40x40 pixel blocks
+            const blocksX = Math.ceil(width / blockSize);
+            const blocksY = Math.ceil(height / blockSize);
+            const densityMap = new Float32Array(blocksX * blocksY);
             
-            console.log(`  ${validated.length} regions passed validation`);
-            return validated;
-        }
-
-        // Check if region has content in its interior (not just edges)
-        function checkInteriorContent(region, gray, width, height) {
-            // Define interior as 20% margin from edges
-            const marginX = Math.floor(region.w * 0.2);
-            const marginY = Math.floor(region.h * 0.2);
+            console.log(`Creating ${blocksX}x${blocksY} density map...`);
             
-            const interiorX1 = region.x + marginX;
-            const interiorY1 = region.y + marginY;
-            const interiorX2 = region.x + region.w - marginX;
-            const interiorY2 = region.y + region.h - marginY;
-            
-            if (interiorX2 <= interiorX1 || interiorY2 <= interiorY1) {
-                return true; // Region too small to have meaningful interior, accept it
-            }
-            
-            // Sample interior
-            let darkPixels = 0;
-            let totalSampled = 0;
-            
-            for (let y = interiorY1; y < interiorY2; y += 10) {
-                for (let x = interiorX1; x < interiorX2; x += 10) {
-                    if (x >= width || y >= height) continue;
+            for (let by = 0; by < blocksY; by++) {
+                for (let bx = 0; bx < blocksX; bx++) {
+                    let darkPixels = 0;
+                    let totalPixels = 0;
                     
-                    if (gray[y * width + x] < 180) darkPixels++;
-                    totalSampled++;
+                    const x1 = bx * blockSize;
+                    const y1 = by * blockSize;
+                    const x2 = Math.min(x1 + blockSize, width);
+                    const y2 = Math.min(y1 + blockSize, height);
+                    
+                    for (let y = y1; y < y2; y++) {
+                        for (let x = x1; x < x2; x++) {
+                            if (gray[y * width + x] < textThreshold) darkPixels++;
+                            totalPixels++;
+                        }
+                    }
+                    
+                    densityMap[by * blocksX + bx] = darkPixels / totalPixels;
                 }
             }
             
-            // Interior should have at least 5% dark content
-            return totalSampled > 0 && (darkPixels / totalSampled) > 0.05;
-        }
-
-        // METHOD 1: Contour detection with gap analysis
-        function detectByContoursWithGaps(gray, width, height) {
-            console.log('  Trying contour detection with gap analysis...');
+            // Find high-density blocks (where obituaries are)
+            const highDensityThreshold = 0.05; // 5% dark pixels
+            const binary = new Uint8ClampedArray(blocksX * blocksY);
             
-            // Otsu's automatic thresholding
-            const threshold = calculateOtsuThreshold(gray);
-            console.log(`  Auto threshold: ${threshold}`);
-            
-            const binary = new Uint8ClampedArray(width * height);
-            for (let i = 0; i < gray.length; i++) {
-                binary[i] = gray[i] < threshold ? 255 : 0;
+            for (let i = 0; i < densityMap.length; i++) {
+                binary[i] = densityMap[i] > highDensityThreshold ? 255 : 0;
             }
-
-            // Morphology to connect text
+            
+            // Dilate to connect nearby high-density areas
             let morphed = binary.slice();
             for (let iter = 0; iter < 3; iter++) {
-                morphed = morphDilate(morphed, width, height, 5);
+                morphed = morphDilate(morphed, blocksX, blocksY, 3);
             }
-
-            // Find contours
-            const regions = findConnectedComponents(morphed, width, height);
-            console.log(`  Raw components found: ${regions.length}`);
             
-            // More lenient filtering
-            const minArea = (width * height) * 0.005; // 0.5% instead of 0.8%
-            const maxArea = (width * height) * 0.85; // 85%
+            // Find connected regions in the block grid
+            const blockRegions = findConnectedComponents(morphed, blocksX, blocksY);
+            console.log(`Found ${blockRegions.length} density regions`);
             
-            let valid = regions.filter(r => {
-                if (r.area < minArea) {
-                    console.log(`    Skip: too small ${r.w}x${r.h} (${(r.area/(width*height)*100).toFixed(1)}%)`);
-                    return false;
+            // Convert block regions back to pixel coordinates
+            const pixelRegions = [];
+            for (const br of blockRegions) {
+                const x = br.x * blockSize;
+                const y = br.y * blockSize;
+                const w = br.w * blockSize;
+                const h = br.h * blockSize;
+                
+                // Must be reasonably sized
+                if (w >= 150 && h >= 150 && w < width * 0.95 && h < height * 0.95) {
+                    // Refine boundaries by finding actual content
+                    const refined = refineBoundaries(x, y, w, h, gray, width, height, textThreshold);
+                    if (refined) {
+                        pixelRegions.push(refined);
+                    }
                 }
-                if (r.area > maxArea) {
-                    console.log(`    Skip: too large ${r.w}x${r.h} (${(r.area/(width*height)*100).toFixed(1)}%)`);
-                    return false;
-                }
-                if (r.w < 50 || r.h < 50) { // More lenient
-                    console.log(`    Skip: dimensions ${r.w}x${r.h}`);
-                    return false;
-                }
-                const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
-                if (aspectRatio > 30) { // More lenient
-                    console.log(`    Skip: aspect ratio ${aspectRatio.toFixed(1)}`);
-                    return false;
-                }
-                return true;
-            });
-
-            console.log(`  Valid regions: ${valid.length}`);
+            }
+            
+            console.log(`After refinement: ${pixelRegions.length} regions`);
+            
+            // Remove overlaps - keep smaller regions when overlapping
+            const nonOverlapping = removeOverlaps(pixelRegions);
+            console.log(`After removing overlaps: ${nonOverlapping.length} regions`);
             
             // Sort by position
-            valid.sort((a, b) => {
+            nonOverlapping.sort((a, b) => {
                 const yDiff = a.y - b.y;
-                return Math.abs(yDiff) < height * 0.15 ? a.x - b.x : yDiff;
+                if (Math.abs(yDiff) < height * 0.15) {
+                    return a.x - b.x;
+                }
+                return yDiff;
             });
-
-            return valid;
+            
+            return nonOverlapping;
         }
 
-        // METHOD 2: Projection profile analysis (finds vertical gaps between obituaries)
-        function detectByProjection(gray, width, height) {
-            console.log('  Trying projection profile analysis...');
+        function refineBoundaries(x, y, w, h, gray, width, height, threshold) {
+            // Find tight bounds around actual content
+            let minX = x + w, maxX = x;
+            let minY = y + h, maxY = y;
+            let hasContent = false;
             
-            // Create horizontal projection (sum of dark pixels per row)
-            const hProj = new Float32Array(height);
-            for (let y = 0; y < height; y++) {
-                let sum = 0;
-                for (let x = 0; x < width; x++) {
-                    sum += (255 - gray[y * width + x]); // Dark pixels contribute more
-                }
-                hProj[y] = sum / width;
-            }
-
-            // Create vertical projection
-            const vProj = new Float32Array(width);
-            for (let x = 0; x < width; x++) {
-                let sum = 0;
-                for (let y = 0; y < height; y++) {
-                    sum += (255 - gray[y * width + x]);
-                }
-                vProj[x] = sum / height;
-            }
-
-            // Find horizontal gaps (low activity rows) - more sensitive
-            const hGapThreshold = Math.max(...hProj) * 0.10; // More sensitive (was 0.15)
-            const hGaps = [];
-            let inGap = false;
-            let gapStart = 0;
-
-            for (let y = 0; y < height; y++) {
-                if (hProj[y] < hGapThreshold) {
-                    if (!inGap) {
-                        gapStart = y;
-                        inGap = true;
+            for (let py = y; py < y + h && py < height; py++) {
+                for (let px = x; px < x + w && px < width; px++) {
+                    if (gray[py * width + px] < threshold) {
+                        minX = Math.min(minX, px);
+                        maxX = Math.max(maxX, px);
+                        minY = Math.min(minY, py);
+                        maxY = Math.max(maxY, py);
+                        hasContent = true;
                     }
-                } else {
-                    if (inGap && y - gapStart > 5) { // Smaller minimum gap (was 10)
-                        hGaps.push({ start: gapStart, end: y });
-                    }
-                    inGap = false;
                 }
             }
-
-            // Find vertical gaps - more sensitive
-            const vGapThreshold = Math.max(...vProj) * 0.10; // More sensitive
-            const vGaps = [];
-            inGap = false;
-            gapStart = 0;
-
-            for (let x = 0; x < width; x++) {
-                if (vProj[x] < vGapThreshold) {
-                    if (!inGap) {
-                        gapStart = x;
-                        inGap = true;
-                    }
-                } else {
-                    if (inGap && x - gapStart > 5) { // Smaller minimum gap
-                        vGaps.push({ start: gapStart, end: x });
-                    }
-                    inGap = false;
-                }
-            }
-
-            console.log(`  Found ${hGaps.length} horizontal gaps, ${vGaps.length} vertical gaps`);
-
-            // If too few gaps, this method isn't working well
-            if (hGaps.length < 1 && vGaps.length < 1) {
-                console.log('  Not enough gaps detected, method failed');
-                return [];
-            }
-
-            // Create regions from gaps
-            const regions = [];
             
-            // Add boundaries
-            const hBoundaries = [0, ...hGaps.flatMap(g => [g.start, g.end]), height];
-            const vBoundaries = [0, ...vGaps.flatMap(g => [g.start, g.end]), width];
-
-            console.log(`  Creating regions from ${hBoundaries.length-1} h-segments and ${vBoundaries.length-1} v-segments`);
-
-            for (let i = 0; i < hBoundaries.length - 1; i++) {
-                for (let j = 0; j < vBoundaries.length - 1; j++) {
-                    const y1 = hBoundaries[i];
-                    const y2 = hBoundaries[i + 1];
-                    const x1 = vBoundaries[j];
-                    const x2 = vBoundaries[j + 1];
-                    
-                    const w = x2 - x1;
-                    const h = y2 - y1;
-                    
-                    if (w < 50 || h < 50) continue; // More lenient
-                    
-                    // Check if region has sufficient content
-                    let contentPixels = 0;
-                    const sampleRate = 5; // Sample every 5 pixels for speed
-                    for (let y = y1; y < y2; y += sampleRate) {
-                        for (let x = x1; x < x2; x += sampleRate) {
-                            if (gray[y * width + x] < 200) contentPixels++;
-                        }
-                    }
-                    
-                    const sampledArea = Math.ceil(w / sampleRate) * Math.ceil(h / sampleRate);
-                    const density = contentPixels / sampledArea;
-                    
-                    if (density > 0.03) { // Lower threshold (was 0.05)
-                        regions.push({ x: x1, y: y1, w: w, h: h, area: w * h });
-                        console.log(`    Region: ${w}x${h} at (${x1},${y1}) density=${(density*100).toFixed(1)}%`);
-                    }
-                }
-            }
-
-            console.log(`  Created ${regions.length} regions from gaps`);
-            return regions;
+            if (!hasContent) return null;
+            
+            const finalW = maxX - minX + 1;
+            const finalH = maxY - minY + 1;
+            
+            // Must meet minimum size
+            if (finalW < 150 || finalH < 150) return null;
+            
+            return { x: minX, y: minY, w: finalW, h: finalH, area: finalW * finalH };
         }
 
-        // METHOD 3: Adaptive threshold with connected components
-        function detectByAdaptiveThreshold(gray, width, height) {
-            console.log('  Trying adaptive threshold method...');
+        function removeOverlaps(regions) {
+            if (regions.length === 0) return [];
             
-            const binary = new Uint8ClampedArray(width * height);
-            const blockSize = 31;
-            const halfBlock = Math.floor(blockSize / 2);
-
-            // Adaptive thresholding
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    let sum = 0, count = 0;
-                    for (let by = -halfBlock; by <= halfBlock; by++) {
-                        for (let bx = -halfBlock; bx <= halfBlock; bx++) {
-                            const ny = y + by, nx = x + bx;
-                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                                sum += gray[ny * width + nx];
-                                count++;
+            const result = [];
+            
+            for (const region of regions) {
+                let overlapsExisting = false;
+                
+                for (let i = 0; i < result.length; i++) {
+                    const existing = result[i];
+                    
+                    const overlapX = Math.min(existing.x + existing.w, region.x + region.w) - 
+                                   Math.max(existing.x, region.x);
+                    const overlapY = Math.min(existing.y + existing.h, region.y + region.h) - 
+                                   Math.max(existing.y, region.y);
+                    
+                    if (overlapX > 0 && overlapY > 0) {
+                        const overlapArea = overlapX * overlapY;
+                        const smallerArea = Math.min(existing.area, region.area);
+                        
+                        // If significant overlap (>40%)
+                        if (overlapArea > smallerArea * 0.4) {
+                            overlapsExisting = true;
+                            
+                            // Keep the smaller one (usually more accurate)
+                            if (region.area < existing.area) {
+                                result[i] = region;
+                                console.log(`  Replacing large region with smaller overlapping one`);
                             }
+                            break;
                         }
                     }
-                    const localThreshold = (sum / count) - 10;
-                    binary[y * width + x] = gray[y * width + x] < localThreshold ? 255 : 0;
+                }
+                
+                if (!overlapsExisting) {
+                    result.push(region);
                 }
             }
-
-            // Heavy morphology
-            let morphed = binary.slice();
-            for (let iter = 0; iter < 6; iter++) {
-                morphed = morphDilate(morphed, width, height, 7);
-            }
-            for (let iter = 0; iter < 2; iter++) {
-                morphed = morphErode(morphed, width, height, 5);
-            }
-
-            const regions = findConnectedComponents(morphed, width, height);
-            console.log(`  Raw components found: ${regions.length}`);
             
-            const minArea = (width * height) * 0.005; // More lenient
-            const maxArea = (width * height) * 0.85;
-            
-            let valid = regions.filter(r => {
-                if (r.area < minArea || r.area > maxArea) return false;
-                if (r.w < 50 || r.h < 50) return false; // More lenient
-                const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
-                if (aspectRatio > 30) return false; // More lenient
-                return true;
-            });
-
-            console.log(`  Valid regions: ${valid.length}`);
-            return valid;
+            return result;
         }
 
         function findConnectedComponents(binary, width, height) {

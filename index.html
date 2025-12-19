@@ -683,51 +683,109 @@
             const imageData = ctx.getImageData(0, 0, width, height);
             const data = imageData.data;
 
+            console.log(`Processing image: ${width}x${height}`);
+
             // Convert to grayscale
             const gray = new Uint8ClampedArray(width * height);
             for (let i = 0; i < data.length; i += 4) {
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Edge detection - find borders/rectangles
-            const edges = detectEdges(gray, width, height);
-            
-            // Find horizontal and vertical lines
-            const horizontalLines = findHorizontalLines(edges, width, height);
-            const verticalLines = findVerticalLines(edges, width, height);
-            
-            console.log(`Found ${horizontalLines.length} horizontal lines, ${verticalLines.length} vertical lines`);
-            
-            // Find rectangles formed by intersecting lines
-            const rectangles = findRectangles(horizontalLines, verticalLines, width, height);
-            
-            console.log(`Found ${rectangles.length} potential rectangles`);
+            // Create working copy
+            const working = gray.slice();
 
-            // Filter rectangles to likely obituaries
-            const minArea = (width * height) * 0.01; // 1% of image
-            const maxArea = (width * height) * 0.80;
+            // FLOOD FILL white background from corners with threshold tolerance
+            const whiteThreshold = 1.5; // Tolerance for "white enough"
+            const filled = new Uint8ClampedArray(width * height);
             
-            let validRects = rectangles.filter(r => {
-                if (r.area < minArea || r.area > maxArea) return false;
+            // Start flood fill from all four corners
+            const startPoints = [
+                [0, 0],                    // Top-left
+                [width - 1, 0],            // Top-right
+                [0, height - 1],           // Bottom-left
+                [width - 1, height - 1]    // Bottom-right
+            ];
+
+            // Also add points along edges (every 50 pixels)
+            for (let x = 50; x < width; x += 50) {
+                startPoints.push([x, 0]);           // Top edge
+                startPoints.push([x, height - 1]);  // Bottom edge
+            }
+            for (let y = 50; y < height; y += 50) {
+                startPoints.push([0, y]);           // Left edge
+                startPoints.push([width - 1, y]);   // Right edge
+            }
+
+            console.log(`Starting flood fill from ${startPoints.length} edge points`);
+
+            for (const [startX, startY] of startPoints) {
+                floodFillWhite(working, filled, width, height, startX, startY, whiteThreshold);
+            }
+
+            // Count how much was filled
+            let filledCount = 0;
+            for (let i = 0; i < filled.length; i++) {
+                if (filled[i] === 1) {
+                    working[i] = 0; // Make filled areas black
+                    filledCount++;
+                }
+            }
+
+            console.log(`Flood filled ${filledCount} pixels (${(filledCount/(width*height)*100).toFixed(1)}% of image)`);
+
+            // Now find connected dark regions (these are obituaries)
+            const visited = new Uint8ClampedArray(width * height);
+            const allRegions = [];
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = y * width + x;
+                    // Look for dark pixels that weren't filled (not background)
+                    if (working[idx] > 50 && !visited[idx]) { // Dark content
+                        const region = floodFillRegion(working, visited, width, height, x, y);
+                        if (region) {
+                            allRegions.push(region);
+                        }
+                    }
+                }
+            }
+
+            console.log(`Found ${allRegions.length} dark regions`);
+
+            // Filter regions
+            const minArea = (width * height) * 0.01; // At least 1% of image
+            const maxArea = (width * height) * 0.75; // Max 75% of image (no bigger than 3/4 page)
+            
+            let validRegions = allRegions.filter(r => {
+                if (r.area < minArea) {
+                    console.log(`Rejected region: too small (${r.area} < ${minArea})`);
+                    return false;
+                }
+                if (r.area > maxArea) {
+                    console.log(`Rejected region: too large (${r.area} > ${maxArea})`);
+                    return false;
+                }
                 
+                // Size checks
+                if (r.w < 100 || r.h < 100) {
+                    console.log(`Rejected region: dimensions too small (${r.w}x${r.h})`);
+                    return false;
+                }
+                
+                // Aspect ratio
                 const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
-                if (aspectRatio > 25) return false; // Too elongated
-                
-                if (r.w < 80 || r.h < 80) return false; // Too small
+                if (aspectRatio > 20) {
+                    console.log(`Rejected region: bad aspect ratio (${aspectRatio.toFixed(1)})`);
+                    return false;
+                }
                 
                 return true;
             });
 
-            console.log(`After filtering: ${validRects.length} valid rectangles`);
+            console.log(`After filtering: ${validRegions.length} valid regions`);
 
-            // If rectangle detection didn't work well, fall back to blob detection
-            if (validRects.length === 0) {
-                console.log('No rectangles found, falling back to blob detection');
-                return findCardsByBlobs(sourceCanvas, pageIndex, gray, width, height);
-            }
-
-            // Sort by position
-            validRects.sort((a, b) => {
+            // Sort by position (top to bottom, left to right)
+            validRegions.sort((a, b) => {
                 const yDiff = a.y - b.y;
                 if (Math.abs(yDiff) < height * 0.15) {
                     return a.x - b.x;
@@ -735,27 +793,27 @@
                 return yDiff;
             });
 
-            // Merge very overlapping rectangles
+            // Merge overlapping regions (in case same obituary was split)
             const merged = [];
-            for (const rect of validRects) {
+            for (const region of validRegions) {
                 let wasMerged = false;
                 
                 for (let i = 0; i < merged.length; i++) {
                     const existing = merged[i];
                     
-                    const overlapX = Math.min(existing.x + existing.w, rect.x + rect.w) - Math.max(existing.x, rect.x);
-                    const overlapY = Math.min(existing.y + existing.h, rect.y + rect.h) - Math.max(existing.y, rect.y);
+                    const overlapX = Math.min(existing.x + existing.w, region.x + region.w) - Math.max(existing.x, region.x);
+                    const overlapY = Math.min(existing.y + existing.h, region.y + region.h) - Math.max(existing.y, region.y);
                     
                     if (overlapX > 0 && overlapY > 0) {
                         const overlapArea = overlapX * overlapY;
-                        const smallerArea = Math.min(existing.area, rect.area);
+                        const smallerArea = Math.min(existing.area, region.area);
                         
-                        // Only merge if >50% overlap (conservative)
-                        if (overlapArea > smallerArea * 0.5) {
-                            const newMinX = Math.min(existing.x, rect.x);
-                            const newMinY = Math.min(existing.y, rect.y);
-                            const newMaxX = Math.max(existing.x + existing.w, rect.x + rect.w);
-                            const newMaxY = Math.max(existing.y + existing.h, rect.y + rect.h);
+                        // Merge if significant overlap (>30%)
+                        if (overlapArea > smallerArea * 0.3) {
+                            const newMinX = Math.min(existing.x, region.x);
+                            const newMinY = Math.min(existing.y, region.y);
+                            const newMaxX = Math.max(existing.x + existing.w, region.x + region.w);
+                            const newMaxY = Math.max(existing.y + existing.h, region.y + region.h);
                             
                             merged[i] = {
                                 x: newMinX,
@@ -772,20 +830,26 @@
                 }
                 
                 if (!wasMerged) {
-                    merged.push(rect);
+                    merged.push(region);
                 }
             }
 
-            console.log(`After merging: ${merged.length} rectangles`);
+            console.log(`After merging: ${merged.length} regions`);
 
-            // Take largest rectangles
-            merged.sort((a, b) => b.area - a.area);
-            const finalRects = merged.slice(0, 10);
+            if (merged.length === 0) {
+                console.log('No regions found, returning full image');
+                return [{
+                    canvas: sourceCanvas,
+                    dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
+                    rotated: false,
+                    sourcePageIndex: pageIndex
+                }];
+            }
 
-            // Extract cards
+            // Extract cards from regions
             const cards = [];
-            for (const r of finalRects) {
-                const padding = 10;
+            for (const r of merged) {
+                const padding = 15;
                 const x = Math.max(0, r.x - padding);
                 const y = Math.max(0, r.y - padding);
                 const w = Math.min(width - x, r.w + 2 * padding);
@@ -805,225 +869,77 @@
             }
 
             console.log(`Returning ${cards.length} cards`);
-            return cards.length > 0 ? cards : [{
-                canvas: sourceCanvas,
-                dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
-                rotated: false,
-                sourcePageIndex: pageIndex
-            }];
+            return cards;
         }
 
-        function detectEdges(gray, width, height) {
-            // Simple Sobel edge detection
-            const edges = new Uint8ClampedArray(width * height);
-            
-            for (let y = 1; y < height - 1; y++) {
-                for (let x = 1; x < width - 1; x++) {
-                    const gx = 
-                        -gray[(y-1)*width + x-1] + gray[(y-1)*width + x+1] +
-                        -2*gray[y*width + x-1] + 2*gray[y*width + x+1] +
-                        -gray[(y+1)*width + x-1] + gray[(y+1)*width + x+1];
-                    
-                    const gy = 
-                        -gray[(y-1)*width + x-1] - 2*gray[(y-1)*width + x] - gray[(y-1)*width + x+1] +
-                        gray[(y+1)*width + x-1] + 2*gray[(y+1)*width + x] + gray[(y+1)*width + x+1];
-                    
-                    const magnitude = Math.sqrt(gx*gx + gy*gy);
-                    edges[y*width + x] = magnitude > 30 ? 255 : 0;
-                }
-            }
-            
-            return edges;
-        }
+        function floodFillWhite(gray, filled, width, height, startX, startY, threshold) {
+            // Only fill if starting point is white-ish
+            const startIdx = startY * width + startX;
+            if (gray[startIdx] < 220) return; // Not white enough to start
 
-        function findHorizontalLines(edges, width, height) {
-            const lines = [];
-            const minLineLength = width * 0.15; // At least 15% of width
-            
-            for (let y = 0; y < height; y++) {
-                let lineStart = -1;
-                let lineLength = 0;
+            const stack = [[startX, startY]];
+            const baseValue = gray[startIdx];
+
+            while (stack.length > 0) {
+                const [x, y] = stack.pop();
                 
-                for (let x = 0; x < width; x++) {
-                    if (edges[y * width + x] === 255) {
-                        if (lineStart === -1) lineStart = x;
-                        lineLength++;
-                    } else {
-                        if (lineLength > minLineLength) {
-                            lines.push({ y: y, x1: lineStart, x2: lineStart + lineLength });
-                        }
-                        lineStart = -1;
-                        lineLength = 0;
-                    }
-                }
+                if (x < 0 || x >= width || y < 0 || y >= height) continue;
                 
-                if (lineLength > minLineLength) {
-                    lines.push({ y: y, x1: lineStart, x2: lineStart + lineLength });
-                }
-            }
-            
-            return lines;
-        }
-
-        function findVerticalLines(edges, width, height) {
-            const lines = [];
-            const minLineLength = height * 0.15; // At least 15% of height
-            
-            for (let x = 0; x < width; x++) {
-                let lineStart = -1;
-                let lineLength = 0;
+                const idx = y * width + x;
+                if (filled[idx] === 1) continue;
                 
-                for (let y = 0; y < height; y++) {
-                    if (edges[y * width + x] === 255) {
-                        if (lineStart === -1) lineStart = y;
-                        lineLength++;
-                    } else {
-                        if (lineLength > minLineLength) {
-                            lines.push({ x: x, y1: lineStart, y2: lineStart + lineLength });
-                        }
-                        lineStart = -1;
-                        lineLength = 0;
-                    }
-                }
+                const pixelValue = gray[idx];
                 
-                if (lineLength > minLineLength) {
-                    lines.push({ x: x, y1: lineStart, y2: lineStart + lineLength });
-                }
+                // Check if pixel is "white enough" (within threshold of white)
+                // Using absolute difference from white (255)
+                const diffFromWhite = 255 - pixelValue;
+                if (diffFromWhite > threshold * 50) continue; // Not white enough (threshold of ~75 gray levels)
+                
+                filled[idx] = 1;
+                
+                // Add neighbors
+                stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
             }
-            
-            return lines;
         }
 
-        function findRectangles(hLines, vLines, width, height) {
-            const rectangles = [];
-            const tolerance = 20; // pixels
-            
-            // Group similar horizontal lines
-            const hGroups = groupLines(hLines.map(l => l.y), tolerance);
-            const vGroups = groupLines(vLines.map(l => l.x), tolerance);
-            
-            // Find rectangles from line intersections
-            for (let i = 0; i < hGroups.length - 1; i++) {
-                for (let j = i + 1; j < hGroups.length; j++) {
-                    const top = hGroups[i];
-                    const bottom = hGroups[j];
-                    
-                    for (let k = 0; k < vGroups.length - 1; k++) {
-                        for (let l = k + 1; l < vGroups.length; l++) {
-                            const left = vGroups[k];
-                            const right = vGroups[l];
-                            
-                            const w = right - left;
-                            const h = bottom - top;
-                            
-                            if (w > 50 && h > 50) {
-                                rectangles.push({
-                                    x: left,
-                                    y: top,
-                                    w: w,
-                                    h: h,
-                                    area: w * h
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            
-            return rectangles;
-        }
+        function floodFillRegion(gray, visited, width, height, startX, startY) {
+            const stack = [[startX, startY]];
+            let minX = startX, maxX = startX;
+            let minY = startY, maxY = startY;
+            let pixelCount = 0;
 
-        function groupLines(positions, tolerance) {
-            if (positions.length === 0) return [];
-            
-            positions.sort((a, b) => a - b);
-            const groups = [positions[0]];
-            
-            for (let i = 1; i < positions.length; i++) {
-                const last = groups[groups.length - 1];
-                if (positions[i] - last > tolerance) {
-                    groups.push(positions[i]);
-                }
-            }
-            
-            return groups;
-        }
-
-        // Fallback blob detection
-        function findCardsByBlobs(sourceCanvas, pageIndex, gray, width, height) {
-            console.log('Using fallback blob detection');
-            
-            const binary = new Uint8ClampedArray(width * height);
-            const whiteThreshold = 220;
-            
-            for (let i = 0; i < gray.length; i++) {
-                binary[i] = gray[i] >= whiteThreshold ? 0 : 255;
+            while (stack.length > 0) {
+                const [x, y] = stack.pop();
+                
+                if (x < 0 || x >= width || y < 0 || y >= height) continue;
+                
+                const idx = y * width + x;
+                if (visited[idx]) continue;
+                
+                // Only include dark pixels (content, not background)
+                if (gray[idx] < 50) continue;
+                
+                visited[idx] = 1;
+                pixelCount++;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+                
+                stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
             }
 
-            let morphed = binary.slice();
-            for (let iter = 0; iter < 8; iter++) {
-                morphed = morphDilate(morphed, width, height, 7);
-            }
-            for (let iter = 0; iter < 2; iter++) {
-                morphed = morphErode(morphed, width, height, 3);
-            }
+            const w = maxX - minX + 1;
+            const h = maxY - minY + 1;
 
-            const visited = new Uint8ClampedArray(width * height);
-            const allContours = [];
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    if (morphed[y * width + x] === 255 && !visited[y * width + x]) {
-                        const contour = floodFillContour(morphed, visited, width, height, x, y);
-                        if (contour) allContours.push(contour);
-                    }
-                }
-            }
-
-            const minArea = (width * height) * 0.015;
-            const maxArea = (width * height) * 0.90;
-            
-            let validContours = allContours.filter(c => {
-                if (c.area < minArea || c.area > maxArea) return false;
-                const aspectRatio = Math.max(c.w, c.h) / Math.min(c.w, c.h);
-                if (aspectRatio > 20) return false;
-                const density = c.pixelCount / c.area;
-                if (density < 0.03) return false;
-                return true;
-            });
-
-            validContours.sort((a, b) => b.area - a.area);
-            const finalContours = validContours.slice(0, 10);
-
-            const cards = [];
-            for (const c of finalContours) {
-                const padding = 20;
-                const x = Math.max(0, c.x - padding);
-                const y = Math.max(0, c.y - padding);
-                const w = Math.min(width - x, c.w + 2 * padding);
-                const h = Math.min(height - y, c.h + 2 * padding);
-
-                if (w > 100 && h > 100) {
-                    const cardCanvas = document.createElement('canvas');
-                    cardCanvas.width = w;
-                    cardCanvas.height = h;
-                    cardCanvas.getContext('2d').drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h);
-                    
-                    cards.push({
-                        canvas: cardCanvas,
-                        dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
-                        rotated: false,
-                        sourcePageIndex: pageIndex
-                    });
-                }
-            }
-
-            return cards.length > 0 ? cards : [{
-                canvas: sourceCanvas,
-                dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
-                rotated: false,
-                sourcePageIndex: pageIndex
-            }];
+            return {
+                x: minX,
+                y: minY,
+                w: w,
+                h: h,
+                area: w * h,
+                pixelCount: pixelCount
+            };
         }
 
         function floodFillContour(binary, visited, width, height, startX, startY) {

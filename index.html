@@ -691,8 +691,8 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Detect obituaries
-            const regions = detectObituaries(gray, width, height);
+            // Detect obituaries using whitespace gap analysis
+            const regions = detectByWhitespaceGaps(gray, width, height);
             
             if (regions.length === 0) {
                 console.log('No obituaries detected, returning full image');
@@ -704,7 +704,7 @@
                 }];
             }
 
-            console.log(`\n✓ Final result: ${regions.length} obituaries detected`);
+            console.log(`\n✓ Final result: ${regions.length} obituaries`);
 
             // Extract cards
             const cards = [];
@@ -734,85 +734,129 @@
             return cards;
         }
 
-        function detectObituaries(gray, width, height) {
-            console.log('Detecting obituaries...');
+        function detectByWhitespaceGaps(gray, width, height) {
+            console.log('Detecting obituaries by whitespace gaps...');
             
-            // Threshold for detecting text
-            const textThreshold = 170;
+            // Step 1: Calculate "whiteness" for each row and column
+            const rowWhiteness = new Float32Array(height);
+            const colWhiteness = new Float32Array(width);
             
-            // Create density map (how much text in each region)
-            const blockSize = 40; // Check in 40x40 pixel blocks
-            const blocksX = Math.ceil(width / blockSize);
-            const blocksY = Math.ceil(height / blockSize);
-            const densityMap = new Float32Array(blocksX * blocksY);
+            console.log('Analyzing row whiteness...');
+            for (let y = 0; y < height; y++) {
+                let whiteCount = 0;
+                for (let x = 0; x < width; x++) {
+                    if (gray[y * width + x] > 220) whiteCount++; // Very white
+                }
+                rowWhiteness[y] = whiteCount / width;
+            }
             
-            console.log(`Creating ${blocksX}x${blocksY} density map...`);
+            console.log('Analyzing column whiteness...');
+            for (let x = 0; x < width; x++) {
+                let whiteCount = 0;
+                for (let y = 0; y < height; y++) {
+                    if (gray[y * width + x] > 220) whiteCount++;
+                }
+                colWhiteness[x] = whiteCount / height;
+            }
             
-            for (let by = 0; by < blocksY; by++) {
-                for (let bx = 0; bx < blocksX; bx++) {
-                    let darkPixels = 0;
-                    let totalPixels = 0;
+            // Step 2: Find significant white gaps (separators between obituaries)
+            const minGapSize = 15; // Minimum pixels for a gap
+            const whiteThreshold = 0.85; // 85% white = gap
+            
+            const hGaps = []; // Horizontal gaps (separate rows)
+            let inGap = false;
+            let gapStart = 0;
+            
+            console.log('Finding horizontal gaps...');
+            for (let y = 0; y < height; y++) {
+                if (rowWhiteness[y] > whiteThreshold) {
+                    if (!inGap) {
+                        gapStart = y;
+                        inGap = true;
+                    }
+                } else {
+                    if (inGap && (y - gapStart) >= minGapSize) {
+                        hGaps.push({ start: gapStart, end: y, mid: Math.floor((gapStart + y) / 2) });
+                        console.log(`  H-gap: rows ${gapStart}-${y} (${y - gapStart}px)`);
+                    }
+                    inGap = false;
+                }
+            }
+            if (inGap && (height - gapStart) >= minGapSize) {
+                hGaps.push({ start: gapStart, end: height, mid: Math.floor((gapStart + height) / 2) });
+            }
+            
+            const vGaps = []; // Vertical gaps (separate columns)
+            inGap = false;
+            gapStart = 0;
+            
+            console.log('Finding vertical gaps...');
+            for (let x = 0; x < width; x++) {
+                if (colWhiteness[x] > whiteThreshold) {
+                    if (!inGap) {
+                        gapStart = x;
+                        inGap = true;
+                    }
+                } else {
+                    if (inGap && (x - gapStart) >= minGapSize) {
+                        vGaps.push({ start: gapStart, end: x, mid: Math.floor((gapStart + x) / 2) });
+                        console.log(`  V-gap: cols ${gapStart}-${x} (${x - gapStart}px)`);
+                    }
+                    inGap = false;
+                }
+            }
+            if (inGap && (width - gapStart) >= minGapSize) {
+                vGaps.push({ start: gapStart, end: width, mid: Math.floor((gapStart + width) / 2) });
+            }
+            
+            console.log(`Found ${hGaps.length} horizontal gaps, ${vGaps.length} vertical gaps`);
+            
+            // Step 3: Use gaps to divide page into grid cells
+            const hDividers = [0, ...hGaps.map(g => g.mid), height];
+            const vDividers = [0, ...vGaps.map(g => g.mid), width];
+            
+            console.log(`Creating ${hDividers.length - 1} x ${vDividers.length - 1} grid...`);
+            
+            const candidates = [];
+            for (let i = 0; i < hDividers.length - 1; i++) {
+                for (let j = 0; j < vDividers.length - 1; j++) {
+                    const y1 = hDividers[i];
+                    const y2 = hDividers[i + 1];
+                    const x1 = vDividers[j];
+                    const x2 = vDividers[j + 1];
                     
-                    const x1 = bx * blockSize;
-                    const y1 = by * blockSize;
-                    const x2 = Math.min(x1 + blockSize, width);
-                    const y2 = Math.min(y1 + blockSize, height);
+                    const w = x2 - x1;
+                    const h = y2 - y1;
                     
-                    for (let y = y1; y < y2; y++) {
-                        for (let x = x1; x < x2; x++) {
-                            if (gray[y * width + x] < textThreshold) darkPixels++;
-                            totalPixels++;
+                    // Must be reasonable size
+                    if (w < 150 || h < 150) {
+                        console.log(`  Skip cell [${i},${j}]: too small ${w}x${h}`);
+                        continue;
+                    }
+                    
+                    // Check if this cell has substantial content
+                    const hasContent = checkCellContent(x1, y1, w, h, gray, width, height);
+                    
+                    if (hasContent) {
+                        // Refine boundaries to tight-fit the content
+                        const refined = refineBoundaries(x1, y1, w, h, gray, width, height);
+                        if (refined) {
+                            candidates.push(refined);
+                            console.log(`  ✓ Cell [${i},${j}]: ${refined.w}x${refined.h} at (${refined.x}, ${refined.y})`);
                         }
-                    }
-                    
-                    densityMap[by * blocksX + bx] = darkPixels / totalPixels;
-                }
-            }
-            
-            // Find high-density blocks (where obituaries are)
-            const highDensityThreshold = 0.05; // 5% dark pixels
-            const binary = new Uint8ClampedArray(blocksX * blocksY);
-            
-            for (let i = 0; i < densityMap.length; i++) {
-                binary[i] = densityMap[i] > highDensityThreshold ? 255 : 0;
-            }
-            
-            // Dilate to connect nearby high-density areas
-            let morphed = binary.slice();
-            for (let iter = 0; iter < 3; iter++) {
-                morphed = morphDilate(morphed, blocksX, blocksY, 3);
-            }
-            
-            // Find connected regions in the block grid
-            const blockRegions = findConnectedComponents(morphed, blocksX, blocksY);
-            console.log(`Found ${blockRegions.length} density regions`);
-            
-            // Convert block regions back to pixel coordinates
-            const pixelRegions = [];
-            for (const br of blockRegions) {
-                const x = br.x * blockSize;
-                const y = br.y * blockSize;
-                const w = br.w * blockSize;
-                const h = br.h * blockSize;
-                
-                // Must be reasonably sized
-                if (w >= 150 && h >= 150 && w < width * 0.95 && h < height * 0.95) {
-                    // Refine boundaries by finding actual content
-                    const refined = refineBoundaries(x, y, w, h, gray, width, height, textThreshold);
-                    if (refined) {
-                        pixelRegions.push(refined);
+                    } else {
+                        console.log(`  Skip cell [${i},${j}]: insufficient content`);
                     }
                 }
             }
             
-            console.log(`After refinement: ${pixelRegions.length} regions`);
+            console.log(`Found ${candidates.length} candidate regions`);
             
-            // Remove overlaps - keep smaller regions when overlapping
-            const nonOverlapping = removeOverlaps(pixelRegions);
-            console.log(`After removing overlaps: ${nonOverlapping.length} regions`);
+            // Step 4: Remove any remaining overlaps (shouldn't be many)
+            const final = removeOverlaps(candidates);
             
-            // Sort by position
-            nonOverlapping.sort((a, b) => {
+            // Step 5: Sort by position
+            final.sort((a, b) => {
                 const yDiff = a.y - b.y;
                 if (Math.abs(yDiff) < height * 0.15) {
                     return a.x - b.x;
@@ -820,18 +864,41 @@
                 return yDiff;
             });
             
-            return nonOverlapping;
+            return final;
         }
 
-        function refineBoundaries(x, y, w, h, gray, width, height, threshold) {
+        function checkCellContent(x, y, w, h, gray, width, height) {
+            // Sample the cell to see if it has significant text content
+            let darkPixels = 0;
+            let totalSampled = 0;
+            
+            // Sample every 10 pixels
+            for (let py = y; py < y + h && py < height; py += 10) {
+                for (let px = x; px < x + w && px < width; px += 10) {
+                    const pixelValue = gray[py * width + px];
+                    if (pixelValue < 180) darkPixels++; // Dark enough to be text
+                    totalSampled++;
+                }
+            }
+            
+            const density = darkPixels / totalSampled;
+            
+            // Need at least 3% dark pixels (text content)
+            return density > 0.03;
+        }
+
+        function refineBoundaries(x, y, w, h, gray, width, height) {
             // Find tight bounds around actual content
             let minX = x + w, maxX = x;
             let minY = y + h, maxY = y;
             let hasContent = false;
             
-            for (let py = y; py < y + h && py < height; py++) {
-                for (let px = x; px < x + w && px < width; px++) {
-                    if (gray[py * width + px] < threshold) {
+            const contentThreshold = 200; // Pixels darker than this are content
+            
+            // Sample every 3 pixels for accuracy
+            for (let py = y; py < y + h && py < height; py += 3) {
+                for (let px = x; px < x + w && px < width; px += 3) {
+                    if (gray[py * width + px] < contentThreshold) {
                         minX = Math.min(minX, px);
                         maxX = Math.max(maxX, px);
                         minY = Math.min(minY, py);
@@ -846,10 +913,29 @@
             const finalW = maxX - minX + 1;
             const finalH = maxY - minY + 1;
             
-            // Must meet minimum size
-            if (finalW < 150 || finalH < 150) return null;
+            // Must meet minimum size after refinement
+            if (finalW < 100 || finalH < 100) return null;
             
-            return { x: minX, y: minY, w: finalW, h: finalH, area: finalW * finalH };
+            // Check that refined region still has decent text content
+            let darkCount = 0;
+            let sampleCount = 0;
+            for (let py = minY; py <= maxY && py < height; py += 8) {
+                for (let px = minX; px <= maxX && px < width; px += 8) {
+                    if (gray[py * width + px] < 170) darkCount++;
+                    sampleCount++;
+                }
+            }
+            
+            const textDensity = darkCount / sampleCount;
+            if (textDensity < 0.04) return null; // Need at least 4% actual text
+            
+            return { 
+                x: minX, 
+                y: minY, 
+                w: finalW, 
+                h: finalH, 
+                area: finalW * finalH 
+            };
         }
 
         function removeOverlaps(regions) {
@@ -872,14 +958,14 @@
                         const overlapArea = overlapX * overlapY;
                         const smallerArea = Math.min(existing.area, region.area);
                         
-                        // If significant overlap (>40%)
-                        if (overlapArea > smallerArea * 0.4) {
+                        // If significant overlap (>30%)
+                        if (overlapArea > smallerArea * 0.3) {
                             overlapsExisting = true;
                             
                             // Keep the smaller one (usually more accurate)
                             if (region.area < existing.area) {
                                 result[i] = region;
-                                console.log(`  Replacing large region with smaller overlapping one`);
+                                console.log(`  Replacing with smaller overlapping region`);
                             }
                             break;
                         }

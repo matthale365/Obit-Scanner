@@ -683,7 +683,7 @@
             const imageData = ctx.getImageData(0, 0, width, height);
             const data = imageData.data;
 
-            console.log(`Processing image: ${width}x${height}`);
+            console.log(`\n=== Processing Scan ${pageIndex + 1}: ${width}x${height} ===`);
 
             // Convert to grayscale
             const gray = new Uint8ClampedArray(width * height);
@@ -691,153 +691,30 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Create working copy
-            const working = gray.slice();
-
-            // FLOOD FILL white background from corners with threshold tolerance
-            const whiteThreshold = 1.5; // Tolerance for "white enough"
-            const filled = new Uint8ClampedArray(width * height);
-            
-            // Start flood fill from all four corners
-            const startPoints = [
-                [0, 0],                    // Top-left
-                [width - 1, 0],            // Top-right
-                [0, height - 1],           // Bottom-left
-                [width - 1, height - 1]    // Bottom-right
+            // Try multiple detection methods
+            const methods = [
+                () => detectByContoursWithGaps(gray, width, height),
+                () => detectByProjection(gray, width, height),
+                () => detectByAdaptiveThreshold(gray, width, height)
             ];
 
-            // Also add points along edges (every 50 pixels)
-            for (let x = 50; x < width; x += 50) {
-                startPoints.push([x, 0]);           // Top edge
-                startPoints.push([x, height - 1]);  // Bottom edge
-            }
-            for (let y = 50; y < height; y += 50) {
-                startPoints.push([0, y]);           // Left edge
-                startPoints.push([width - 1, y]);   // Right edge
-            }
-
-            console.log(`Starting flood fill from ${startPoints.length} edge points`);
-
-            for (const [startX, startY] of startPoints) {
-                floodFillWhite(working, filled, width, height, startX, startY, whiteThreshold);
-            }
-
-            // Count how much was filled
-            let filledCount = 0;
-            for (let i = 0; i < filled.length; i++) {
-                if (filled[i] === 1) {
-                    working[i] = 0; // Make filled areas black
-                    filledCount++;
-                }
-            }
-
-            console.log(`Flood filled ${filledCount} pixels (${(filledCount/(width*height)*100).toFixed(1)}% of image)`);
-
-            // Now find connected dark regions (these are obituaries)
-            const visited = new Uint8ClampedArray(width * height);
-            const allRegions = [];
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    const idx = y * width + x;
-                    // Look for dark pixels that weren't filled (not background)
-                    if (working[idx] > 50 && !visited[idx]) { // Dark content
-                        const region = floodFillRegion(working, visited, width, height, x, y);
-                        if (region) {
-                            allRegions.push(region);
-                        }
-                    }
-                }
-            }
-
-            console.log(`Found ${allRegions.length} dark regions`);
-
-            // Filter regions
-            const minArea = (width * height) * 0.01; // At least 1% of image
-            const maxArea = (width * height) * 0.75; // Max 75% of image (no bigger than 3/4 page)
+            let allResults = [];
             
-            let validRegions = allRegions.filter(r => {
-                if (r.area < minArea) {
-                    console.log(`Rejected region: too small (${r.area} < ${minArea})`);
-                    return false;
-                }
-                if (r.area > maxArea) {
-                    console.log(`Rejected region: too large (${r.area} > ${maxArea})`);
-                    return false;
-                }
-                
-                // Size checks
-                if (r.w < 100 || r.h < 100) {
-                    console.log(`Rejected region: dimensions too small (${r.w}x${r.h})`);
-                    return false;
-                }
-                
-                // Aspect ratio
-                const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
-                if (aspectRatio > 20) {
-                    console.log(`Rejected region: bad aspect ratio (${aspectRatio.toFixed(1)})`);
-                    return false;
-                }
-                
-                return true;
-            });
-
-            console.log(`After filtering: ${validRegions.length} valid regions`);
-
-            // Sort by position (top to bottom, left to right)
-            validRegions.sort((a, b) => {
-                const yDiff = a.y - b.y;
-                if (Math.abs(yDiff) < height * 0.15) {
-                    return a.x - b.x;
-                }
-                return yDiff;
-            });
-
-            // Merge overlapping regions (in case same obituary was split)
-            const merged = [];
-            for (const region of validRegions) {
-                let wasMerged = false;
-                
-                for (let i = 0; i < merged.length; i++) {
-                    const existing = merged[i];
-                    
-                    const overlapX = Math.min(existing.x + existing.w, region.x + region.w) - Math.max(existing.x, region.x);
-                    const overlapY = Math.min(existing.y + existing.h, region.y + region.h) - Math.max(existing.y, region.y);
-                    
-                    if (overlapX > 0 && overlapY > 0) {
-                        const overlapArea = overlapX * overlapY;
-                        const smallerArea = Math.min(existing.area, region.area);
-                        
-                        // Merge if significant overlap (>30%)
-                        if (overlapArea > smallerArea * 0.3) {
-                            const newMinX = Math.min(existing.x, region.x);
-                            const newMinY = Math.min(existing.y, region.y);
-                            const newMaxX = Math.max(existing.x + existing.w, region.x + region.w);
-                            const newMaxY = Math.max(existing.y + existing.h, region.y + region.h);
-                            
-                            merged[i] = {
-                                x: newMinX,
-                                y: newMinY,
-                                w: newMaxX - newMinX,
-                                h: newMaxY - newMinY,
-                                area: (newMaxX - newMinX) * (newMaxY - newMinY)
-                            };
-                            
-                            wasMerged = true;
-                            break;
-                        }
-                    }
-                }
-                
-                if (!wasMerged) {
-                    merged.push(region);
+            for (let i = 0; i < methods.length; i++) {
+                console.log(`\nMethod ${i + 1}:`);
+                const result = methods[i]();
+                if (result && result.length > 0) {
+                    allResults.push({
+                        method: i + 1,
+                        regions: result,
+                        score: scoreDetectionResult(result, width, height)
+                    });
                 }
             }
 
-            console.log(`After merging: ${merged.length} regions`);
-
-            if (merged.length === 0) {
-                console.log('No regions found, returning full image');
+            // Pick best result
+            if (allResults.length === 0) {
+                console.log('No detections found, returning full image');
                 return [{
                     canvas: sourceCanvas,
                     dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
@@ -846,14 +723,19 @@
                 }];
             }
 
-            // Extract cards from regions
+            allResults.sort((a, b) => b.score - a.score);
+            const best = allResults[0];
+            console.log(`\nBest method: #${best.method} (score: ${best.score.toFixed(2)})`);
+            console.log(`Found ${best.regions.length} obituaries`);
+
+            // Extract cards
             const cards = [];
-            for (const r of merged) {
+            for (const region of best.regions) {
                 const padding = 15;
-                const x = Math.max(0, r.x - padding);
-                const y = Math.max(0, r.y - padding);
-                const w = Math.min(width - x, r.w + 2 * padding);
-                const h = Math.min(height - y, r.h + 2 * padding);
+                const x = Math.max(0, region.x - padding);
+                const y = Math.max(0, region.y - padding);
+                const w = Math.min(width - x, region.w + 2 * padding);
+                const h = Math.min(height - y, region.h + 2 * padding);
 
                 const cardCanvas = document.createElement('canvas');
                 cardCanvas.width = w;
@@ -868,78 +750,326 @@
                 });
             }
 
-            console.log(`Returning ${cards.length} cards`);
             return cards;
         }
 
-        function floodFillWhite(gray, filled, width, height, startX, startY, threshold) {
-            // Only fill if starting point is white-ish
-            const startIdx = startY * width + startX;
-            if (gray[startIdx] < 220) return; // Not white enough to start
-
-            const stack = [[startX, startY]];
-            const baseValue = gray[startIdx];
-
-            while (stack.length > 0) {
-                const [x, y] = stack.pop();
-                
-                if (x < 0 || x >= width || y < 0 || y >= height) continue;
-                
-                const idx = y * width + x;
-                if (filled[idx] === 1) continue;
-                
-                const pixelValue = gray[idx];
-                
-                // Check if pixel is "white enough" (within threshold of white)
-                // Using absolute difference from white (255)
-                const diffFromWhite = 255 - pixelValue;
-                if (diffFromWhite > threshold * 50) continue; // Not white enough (threshold of ~75 gray levels)
-                
-                filled[idx] = 1;
-                
-                // Add neighbors
-                stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+        // METHOD 1: Contour detection with gap analysis
+        function detectByContoursWithGaps(gray, width, height) {
+            console.log('  Trying contour detection with gap analysis...');
+            
+            // Otsu's automatic thresholding
+            const threshold = calculateOtsuThreshold(gray);
+            console.log(`  Auto threshold: ${threshold}`);
+            
+            const binary = new Uint8ClampedArray(width * height);
+            for (let i = 0; i < gray.length; i++) {
+                binary[i] = gray[i] < threshold ? 255 : 0;
             }
+
+            // Morphology to connect text
+            let morphed = binary.slice();
+            for (let iter = 0; iter < 3; iter++) {
+                morphed = morphDilate(morphed, width, height, 5);
+            }
+
+            // Find contours
+            const regions = findConnectedComponents(morphed, width, height);
+            
+            // Filter and validate
+            const minArea = (width * height) * 0.008;
+            const maxArea = (width * height) * 0.70;
+            
+            let valid = regions.filter(r => {
+                if (r.area < minArea || r.area > maxArea) return false;
+                if (r.w < 80 || r.h < 80) return false;
+                const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
+                if (aspectRatio > 25) return false;
+                return true;
+            });
+
+            console.log(`  Found ${valid.length} valid regions`);
+            
+            // Sort by position
+            valid.sort((a, b) => {
+                const yDiff = a.y - b.y;
+                return Math.abs(yDiff) < height * 0.15 ? a.x - b.x : yDiff;
+            });
+
+            return valid;
         }
 
-        function floodFillRegion(gray, visited, width, height, startX, startY) {
+        // METHOD 2: Projection profile analysis (finds vertical gaps between obituaries)
+        function detectByProjection(gray, width, height) {
+            console.log('  Trying projection profile analysis...');
+            
+            // Create horizontal projection (sum of dark pixels per row)
+            const hProj = new Float32Array(height);
+            for (let y = 0; y < height; y++) {
+                let sum = 0;
+                for (let x = 0; x < width; x++) {
+                    sum += (255 - gray[y * width + x]); // Dark pixels contribute more
+                }
+                hProj[y] = sum / width;
+            }
+
+            // Create vertical projection
+            const vProj = new Float32Array(width);
+            for (let x = 0; x < width; x++) {
+                let sum = 0;
+                for (let y = 0; y < height; y++) {
+                    sum += (255 - gray[y * width + x]);
+                }
+                vProj[x] = sum / height;
+            }
+
+            // Find horizontal gaps (low activity rows)
+            const hGapThreshold = Math.max(...hProj) * 0.15;
+            const hGaps = [];
+            let inGap = false;
+            let gapStart = 0;
+
+            for (let y = 0; y < height; y++) {
+                if (hProj[y] < hGapThreshold) {
+                    if (!inGap) {
+                        gapStart = y;
+                        inGap = true;
+                    }
+                } else {
+                    if (inGap && y - gapStart > 10) { // Significant gap
+                        hGaps.push({ start: gapStart, end: y });
+                    }
+                    inGap = false;
+                }
+            }
+
+            // Find vertical gaps
+            const vGapThreshold = Math.max(...vProj) * 0.15;
+            const vGaps = [];
+            inGap = false;
+            gapStart = 0;
+
+            for (let x = 0; x < width; x++) {
+                if (vProj[x] < vGapThreshold) {
+                    if (!inGap) {
+                        gapStart = x;
+                        inGap = true;
+                    }
+                } else {
+                    if (inGap && x - gapStart > 10) {
+                        vGaps.push({ start: gapStart, end: x });
+                    }
+                    inGap = false;
+                }
+            }
+
+            console.log(`  Found ${hGaps.length} horizontal gaps, ${vGaps.length} vertical gaps`);
+
+            // Create regions from gaps
+            const regions = [];
+            
+            // Add full height if no horizontal gaps
+            const hBoundaries = [0, ...hGaps.flatMap(g => [g.start, g.end]), height];
+            const vBoundaries = [0, ...vGaps.flatMap(g => [g.start, g.end]), width];
+
+            for (let i = 0; i < hBoundaries.length - 1; i++) {
+                for (let j = 0; j < vBoundaries.length - 1; j++) {
+                    const y1 = hBoundaries[i];
+                    const y2 = hBoundaries[i + 1];
+                    const x1 = vBoundaries[j];
+                    const x2 = vBoundaries[j + 1];
+                    
+                    const w = x2 - x1;
+                    const h = y2 - y1;
+                    
+                    if (w > 100 && h > 100) {
+                        // Check if region has sufficient content
+                        let contentPixels = 0;
+                        for (let y = y1; y < y2; y++) {
+                            for (let x = x1; x < x2; x++) {
+                                if (gray[y * width + x] < 200) contentPixels++;
+                            }
+                        }
+                        
+                        if (contentPixels > (w * h) * 0.05) {
+                            regions.push({ x: x1, y: y1, w: w, h: h, area: w * h });
+                        }
+                    }
+                }
+            }
+
+            console.log(`  Created ${regions.length} regions from gaps`);
+            return regions;
+        }
+
+        // METHOD 3: Adaptive threshold with connected components
+        function detectByAdaptiveThreshold(gray, width, height) {
+            console.log('  Trying adaptive threshold method...');
+            
+            const binary = new Uint8ClampedArray(width * height);
+            const blockSize = 31;
+            const halfBlock = Math.floor(blockSize / 2);
+
+            // Adaptive thresholding
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let sum = 0, count = 0;
+                    for (let by = -halfBlock; by <= halfBlock; by++) {
+                        for (let bx = -halfBlock; bx <= halfBlock; bx++) {
+                            const ny = y + by, nx = x + bx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                sum += gray[ny * width + nx];
+                                count++;
+                            }
+                        }
+                    }
+                    const localThreshold = (sum / count) - 10;
+                    binary[y * width + x] = gray[y * width + x] < localThreshold ? 255 : 0;
+                }
+            }
+
+            // Heavy morphology
+            let morphed = binary.slice();
+            for (let iter = 0; iter < 6; iter++) {
+                morphed = morphDilate(morphed, width, height, 7);
+            }
+            for (let iter = 0; iter < 2; iter++) {
+                morphed = morphErode(morphed, width, height, 5);
+            }
+
+            const regions = findConnectedComponents(morphed, width, height);
+            
+            const minArea = (width * height) * 0.01;
+            const maxArea = (width * height) * 0.75;
+            
+            let valid = regions.filter(r => {
+                if (r.area < minArea || r.area > maxArea) return false;
+                if (r.w < 100 || r.h < 100) return false;
+                const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
+                if (aspectRatio > 20) return false;
+                return true;
+            });
+
+            console.log(`  Found ${valid.length} valid regions`);
+            return valid;
+        }
+
+        function findConnectedComponents(binary, width, height) {
+            const visited = new Uint8ClampedArray(width * height);
+            const components = [];
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (binary[y * width + x] === 255 && !visited[y * width + x]) {
+                        const component = floodFillComponent(binary, visited, width, height, x, y);
+                        if (component) components.push(component);
+                    }
+                }
+            }
+
+            return components;
+        }
+
+        function floodFillComponent(binary, visited, width, height, startX, startY) {
             const stack = [[startX, startY]];
-            let minX = startX, maxX = startX;
-            let minY = startY, maxY = startY;
-            let pixelCount = 0;
+            let minX = startX, maxX = startX, minY = startY, maxY = startY;
+            let count = 0;
 
             while (stack.length > 0) {
                 const [x, y] = stack.pop();
-                
                 if (x < 0 || x >= width || y < 0 || y >= height) continue;
                 
                 const idx = y * width + x;
-                if (visited[idx]) continue;
-                
-                // Only include dark pixels (content, not background)
-                if (gray[idx] < 50) continue;
-                
+                if (visited[idx] || binary[idx] !== 255) continue;
+
                 visited[idx] = 1;
-                pixelCount++;
+                count++;
                 minX = Math.min(minX, x);
                 maxX = Math.max(maxX, x);
                 minY = Math.min(minY, y);
                 maxY = Math.max(maxY, y);
-                
-                stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
-            }
 
-            const w = maxX - minX + 1;
-            const h = maxY - minY + 1;
+                stack.push([x+1, y], [x-1, y], [x, y+1], [x, y-1]);
+            }
 
             return {
                 x: minX,
                 y: minY,
-                w: w,
-                h: h,
-                area: w * h,
-                pixelCount: pixelCount
+                w: maxX - minX + 1,
+                h: maxY - minY + 1,
+                area: (maxX - minX + 1) * (maxY - minY + 1),
+                pixelCount: count
             };
+        }
+
+        function calculateOtsuThreshold(gray) {
+            // Build histogram
+            const histogram = new Array(256).fill(0);
+            for (let i = 0; i < gray.length; i++) {
+                histogram[gray[i]]++;
+            }
+
+            const total = gray.length;
+            let sum = 0;
+            for (let i = 0; i < 256; i++) {
+                sum += i * histogram[i];
+            }
+
+            let sumB = 0, wB = 0, wF = 0;
+            let maxVariance = 0;
+            let threshold = 0;
+
+            for (let t = 0; t < 256; t++) {
+                wB += histogram[t];
+                if (wB === 0) continue;
+                
+                wF = total - wB;
+                if (wF === 0) break;
+
+                sumB += t * histogram[t];
+                const mB = sumB / wB;
+                const mF = (sum - sumB) / wF;
+
+                const variance = wB * wF * (mB - mF) * (mB - mF);
+
+                if (variance > maxVariance) {
+                    maxVariance = variance;
+                    threshold = t;
+                }
+            }
+
+            return threshold;
+        }
+
+        function scoreDetectionResult(regions, width, height) {
+            if (regions.length === 0) return 0;
+
+            let score = 0;
+
+            // Prefer 3-6 obituaries (most common)
+            if (regions.length >= 3 && regions.length <= 6) {
+                score += 50;
+            } else if (regions.length >= 2 && regions.length <= 8) {
+                score += 30;
+            } else {
+                score += 10;
+            }
+
+            // Check size consistency
+            const avgArea = regions.reduce((sum, r) => sum + r.area, 0) / regions.length;
+            const areaVariance = regions.reduce((sum, r) => sum + Math.abs(r.area - avgArea), 0) / regions.length;
+            const consistency = 1 - (areaVariance / avgArea);
+            score += consistency * 30;
+
+            // Prefer reasonable sizes
+            const totalImageArea = width * height;
+            const totalObitArea = regions.reduce((sum, r) => sum + r.area, 0);
+            const coverage = totalObitArea / totalImageArea;
+            
+            if (coverage > 0.4 && coverage < 0.85) {
+                score += 20; // Good coverage
+            }
+
+            return score;
         }
 
         function floodFillContour(binary, visited, width, height, startX, startY) {

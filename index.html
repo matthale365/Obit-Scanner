@@ -745,7 +745,7 @@
             for (let y = 0; y < height; y++) {
                 let whiteCount = 0;
                 for (let x = 0; x < width; x++) {
-                    if (gray[y * width + x] > 220) whiteCount++; // Very white
+                    if (gray[y * width + x] > 215) whiteCount++; // White threshold
                 }
                 rowWhiteness[y] = whiteCount / width;
             }
@@ -754,14 +754,14 @@
             for (let x = 0; x < width; x++) {
                 let whiteCount = 0;
                 for (let y = 0; y < height; y++) {
-                    if (gray[y * width + x] > 220) whiteCount++;
+                    if (gray[y * width + x] > 215) whiteCount++;
                 }
                 colWhiteness[x] = whiteCount / height;
             }
             
-            // Step 2: Find SIGNIFICANT white gaps (much stricter)
-            const minGapSize = Math.max(50, Math.min(width, height) * 0.02); // At least 50px or 2% of image
-            const whiteThreshold = 0.92; // 92% white = gap (stricter)
+            // Step 2: Find white gaps - balanced settings
+            const minGapSize = 30; // 30 pixels minimum
+            const whiteThreshold = 0.88; // 88% white = gap
             
             const hGaps = []; // Horizontal gaps (separate rows)
             let inGap = false;
@@ -784,6 +784,7 @@
             }
             if (inGap && (height - gapStart) >= minGapSize) {
                 hGaps.push({ start: gapStart, end: height, mid: Math.floor((gapStart + height) / 2) });
+                console.log(`  H-gap at bottom: rows ${gapStart}-${height}`);
             }
             
             const vGaps = []; // Vertical gaps (separate columns)
@@ -800,13 +801,14 @@
                 } else {
                     if (inGap && (x - gapStart) >= minGapSize) {
                         vGaps.push({ start: gapStart, end: x, mid: Math.floor((gapStart + x) / 2) });
-                        console.log(`  V-gap: cols ${gapStart}-${x} (x - gapStart}px)`);
+                        console.log(`  V-gap: cols ${gapStart}-${x} (${x - gapStart}px)`);
                     }
                     inGap = false;
                 }
             }
             if (inGap && (width - gapStart) >= minGapSize) {
                 vGaps.push({ start: gapStart, end: width, mid: Math.floor((gapStart + width) / 2) });
+                console.log(`  V-gap at right: cols ${gapStart}-${width}`);
             }
             
             console.log(`Found ${hGaps.length} horizontal gaps, ${vGaps.length} vertical gaps`);
@@ -828,34 +830,34 @@
                     const w = x2 - x1;
                     const h = y2 - y1;
                     
-                    // Much stricter minimum size
-                    const minWidth = Math.max(250, width * 0.15);  // At least 250px or 15% of width
-                    const minHeight = Math.max(250, height * 0.10); // At least 250px or 10% of height
+                    // Moderate minimum size
+                    const minWidth = 200;
+                    const minHeight = 200;
                     
                     if (w < minWidth || h < minHeight) {
-                        console.log(`  Skip cell [${i},${j}]: too small ${w}x${h} (need ${minWidth.toFixed(0)}x${minHeight.toFixed(0)})`);
+                        console.log(`  Skip cell [${i},${j}]: too small ${w}x${h}`);
                         continue;
                     }
                     
                     // Check if this cell has substantial content
-                    const hasContent = checkCellContent(x1, y1, w, h, gray, width, height);
+                    const contentCheck = checkCellContent(x1, y1, w, h, gray, width, height);
                     
-                    if (hasContent) {
+                    if (contentCheck.hasContent) {
                         // Refine boundaries to tight-fit the content
                         const refined = refineBoundaries(x1, y1, w, h, gray, width, height);
                         if (refined) {
                             candidates.push(refined);
-                            console.log(`  ✓ Cell [${i},${j}]: ${refined.w}x${refined.h} at (${refined.x}, ${refined.y})`);
+                            console.log(`  ✓ Cell [${i},${j}]: ${refined.w}x${refined.h} at (${refined.x}, ${refined.y}) density=${(contentCheck.density*100).toFixed(1)}%`);
                         }
                     } else {
-                        console.log(`  Skip cell [${i},${j}]: insufficient content`);
+                        console.log(`  Skip cell [${i},${j}]: insufficient content (density=${(contentCheck.density*100).toFixed(1)}%)`);
                     }
                 }
             }
             
             console.log(`Found ${candidates.length} candidate regions`);
             
-            // Step 4: Merge nearby regions (they might be parts of same obituary)
+            // Step 4: Merge regions that are very close (fragments of same obituary)
             const merged = mergeNearbyRegions(candidates, width, height);
             console.log(`After merging nearby: ${merged.length} regions`);
             
@@ -877,8 +879,12 @@
         function mergeNearbyRegions(regions, width, height) {
             if (regions.length === 0) return [];
             
-            // Merge regions that are close to each other (likely same obituary)
-            const maxGap = Math.min(width, height) * 0.03; // 3% of image size
+            // Merge regions that are very close to each other
+            const maxGapX = Math.min(100, width * 0.05);  // 5% of width or 100px
+            const maxGapY = Math.min(80, height * 0.03);  // 3% of height or 80px
+            
+            console.log(`  Merge threshold: X-gap<${maxGapX.toFixed(0)}px, Y-gap<${maxGapY.toFixed(0)}px`);
+            
             const merged = [];
             
             for (const region of regions) {
@@ -887,23 +893,28 @@
                 for (let i = 0; i < merged.length; i++) {
                     const existing = merged[i];
                     
-                    // Calculate gap between regions
-                    const xGap = Math.max(0, 
-                        Math.min(
-                            region.x - (existing.x + existing.w),
-                            existing.x - (region.x + region.w)
-                        )
+                    // Calculate gaps between regions
+                    const rightOfExisting = region.x - (existing.x + existing.w);
+                    const leftOfExisting = existing.x - (region.x + region.w);
+                    const belowExisting = region.y - (existing.y + existing.h);
+                    const aboveExisting = existing.y - (region.y + region.h);
+                    
+                    const xGap = Math.min(
+                        Math.abs(rightOfExisting),
+                        Math.abs(leftOfExisting)
                     );
                     
-                    const yGap = Math.max(0,
-                        Math.min(
-                            region.y - (existing.y + existing.h),
-                            existing.y - (region.y + region.h)
-                        )
+                    const yGap = Math.min(
+                        Math.abs(belowExisting),
+                        Math.abs(aboveExisting)
                     );
                     
-                    // If regions are close (small gap)
-                    if (xGap < maxGap && yGap < maxGap) {
+                    // Check if overlapping or very close
+                    const overlapping = (rightOfExisting < 0 || leftOfExisting < 0) && 
+                                       (belowExisting < 0 || aboveExisting < 0);
+                    const veryClose = xGap < maxGapX && yGap < maxGapY;
+                    
+                    if (overlapping || veryClose) {
                         // Merge them
                         const newMinX = Math.min(existing.x, region.x);
                         const newMinY = Math.min(existing.y, region.y);
@@ -918,7 +929,7 @@
                             area: (newMaxX - newMinX) * (newMaxY - newMinY)
                         };
                         
-                        console.log(`  Merged two nearby regions (gap: ${Math.max(xGap, yGap).toFixed(0)}px)`);
+                        console.log(`    Merged two regions (X-gap: ${xGap.toFixed(0)}px, Y-gap: ${yGap.toFixed(0)}px)`);
                         wasMerged = true;
                         break;
                     }
@@ -948,8 +959,11 @@
             
             const density = darkPixels / totalSampled;
             
-            // Need at least 5% dark pixels (stricter)
-            return density > 0.05;
+            // Need at least 4% dark pixels
+            return {
+                hasContent: density > 0.04,
+                density: density
+            };
         }
 
         function refineBoundaries(x, y, w, h, gray, width, height) {
@@ -960,9 +974,9 @@
             
             const contentThreshold = 200; // Pixels darker than this are content
             
-            // Sample every 3 pixels for accuracy
-            for (let py = y; py < y + h && py < height; py += 3) {
-                for (let px = x; px < x + w && px < width; px += 3) {
+            // Sample every 4 pixels for balance of speed/accuracy
+            for (let py = y; py < y + h && py < height; py += 4) {
+                for (let px = x; px < x + w && px < width; px += 4) {
                     if (gray[py * width + px] < contentThreshold) {
                         minX = Math.min(minX, px);
                         maxX = Math.max(maxX, px);
@@ -978,10 +992,9 @@
             const finalW = maxX - minX + 1;
             const finalH = maxY - minY + 1;
             
-            // Stricter minimum size after refinement
-            const minSize = Math.max(200, Math.min(width, height) * 0.08);
-            if (finalW < minSize || finalH < minSize) {
-                console.log(`    Refined too small: ${finalW}x${finalH} (need ${minSize.toFixed(0)})`);
+            // Minimum size after refinement
+            if (finalW < 150 || finalH < 150) {
+                console.log(`    Refined too small: ${finalW}x${finalH}`);
                 return null;
             }
             
@@ -990,13 +1003,13 @@
             let sampleCount = 0;
             for (let py = minY; py <= maxY && py < height; py += 8) {
                 for (let px = minX; px <= maxX && px < width; px += 8) {
-                    if (gray[py * width + px] < 170) darkCount++;
+                    if (gray[py * width + px] < 175) darkCount++;
                     sampleCount++;
                 }
             }
             
             const textDensity = darkCount / sampleCount;
-            if (textDensity < 0.05) { // Stricter - need at least 5% actual text
+            if (textDensity < 0.045) { // Need at least 4.5% actual text
                 console.log(`    Text density too low: ${(textDensity*100).toFixed(1)}%`);
                 return null;
             }

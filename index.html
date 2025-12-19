@@ -774,20 +774,34 @@
 
             // Find contours
             const regions = findConnectedComponents(morphed, width, height);
+            console.log(`  Raw components found: ${regions.length}`);
             
-            // Filter and validate
-            const minArea = (width * height) * 0.008;
-            const maxArea = (width * height) * 0.70;
+            // More lenient filtering
+            const minArea = (width * height) * 0.005; // 0.5% instead of 0.8%
+            const maxArea = (width * height) * 0.85; // 85%
             
             let valid = regions.filter(r => {
-                if (r.area < minArea || r.area > maxArea) return false;
-                if (r.w < 80 || r.h < 80) return false;
+                if (r.area < minArea) {
+                    console.log(`    Skip: too small ${r.w}x${r.h} (${(r.area/(width*height)*100).toFixed(1)}%)`);
+                    return false;
+                }
+                if (r.area > maxArea) {
+                    console.log(`    Skip: too large ${r.w}x${r.h} (${(r.area/(width*height)*100).toFixed(1)}%)`);
+                    return false;
+                }
+                if (r.w < 50 || r.h < 50) { // More lenient
+                    console.log(`    Skip: dimensions ${r.w}x${r.h}`);
+                    return false;
+                }
                 const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
-                if (aspectRatio > 25) return false;
+                if (aspectRatio > 30) { // More lenient
+                    console.log(`    Skip: aspect ratio ${aspectRatio.toFixed(1)}`);
+                    return false;
+                }
                 return true;
             });
 
-            console.log(`  Found ${valid.length} valid regions`);
+            console.log(`  Valid regions: ${valid.length}`);
             
             // Sort by position
             valid.sort((a, b) => {
@@ -822,8 +836,8 @@
                 vProj[x] = sum / height;
             }
 
-            // Find horizontal gaps (low activity rows)
-            const hGapThreshold = Math.max(...hProj) * 0.15;
+            // Find horizontal gaps (low activity rows) - more sensitive
+            const hGapThreshold = Math.max(...hProj) * 0.10; // More sensitive (was 0.15)
             const hGaps = [];
             let inGap = false;
             let gapStart = 0;
@@ -835,15 +849,15 @@
                         inGap = true;
                     }
                 } else {
-                    if (inGap && y - gapStart > 10) { // Significant gap
+                    if (inGap && y - gapStart > 5) { // Smaller minimum gap (was 10)
                         hGaps.push({ start: gapStart, end: y });
                     }
                     inGap = false;
                 }
             }
 
-            // Find vertical gaps
-            const vGapThreshold = Math.max(...vProj) * 0.15;
+            // Find vertical gaps - more sensitive
+            const vGapThreshold = Math.max(...vProj) * 0.10; // More sensitive
             const vGaps = [];
             inGap = false;
             gapStart = 0;
@@ -855,7 +869,7 @@
                         inGap = true;
                     }
                 } else {
-                    if (inGap && x - gapStart > 10) {
+                    if (inGap && x - gapStart > 5) { // Smaller minimum gap
                         vGaps.push({ start: gapStart, end: x });
                     }
                     inGap = false;
@@ -864,12 +878,20 @@
 
             console.log(`  Found ${hGaps.length} horizontal gaps, ${vGaps.length} vertical gaps`);
 
+            // If too few gaps, this method isn't working well
+            if (hGaps.length < 1 && vGaps.length < 1) {
+                console.log('  Not enough gaps detected, method failed');
+                return [];
+            }
+
             // Create regions from gaps
             const regions = [];
             
-            // Add full height if no horizontal gaps
+            // Add boundaries
             const hBoundaries = [0, ...hGaps.flatMap(g => [g.start, g.end]), height];
             const vBoundaries = [0, ...vGaps.flatMap(g => [g.start, g.end]), width];
+
+            console.log(`  Creating regions from ${hBoundaries.length-1} h-segments and ${vBoundaries.length-1} v-segments`);
 
             for (let i = 0; i < hBoundaries.length - 1; i++) {
                 for (let j = 0; j < vBoundaries.length - 1; j++) {
@@ -881,18 +903,23 @@
                     const w = x2 - x1;
                     const h = y2 - y1;
                     
-                    if (w > 100 && h > 100) {
-                        // Check if region has sufficient content
-                        let contentPixels = 0;
-                        for (let y = y1; y < y2; y++) {
-                            for (let x = x1; x < x2; x++) {
-                                if (gray[y * width + x] < 200) contentPixels++;
-                            }
+                    if (w < 50 || h < 50) continue; // More lenient
+                    
+                    // Check if region has sufficient content
+                    let contentPixels = 0;
+                    const sampleRate = 5; // Sample every 5 pixels for speed
+                    for (let y = y1; y < y2; y += sampleRate) {
+                        for (let x = x1; x < x2; x += sampleRate) {
+                            if (gray[y * width + x] < 200) contentPixels++;
                         }
-                        
-                        if (contentPixels > (w * h) * 0.05) {
-                            regions.push({ x: x1, y: y1, w: w, h: h, area: w * h });
-                        }
+                    }
+                    
+                    const sampledArea = Math.ceil(w / sampleRate) * Math.ceil(h / sampleRate);
+                    const density = contentPixels / sampledArea;
+                    
+                    if (density > 0.03) { // Lower threshold (was 0.05)
+                        regions.push({ x: x1, y: y1, w: w, h: h, area: w * h });
+                        console.log(`    Region: ${w}x${h} at (${x1},${y1}) density=${(density*100).toFixed(1)}%`);
                     }
                 }
             }
@@ -937,19 +964,20 @@
             }
 
             const regions = findConnectedComponents(morphed, width, height);
+            console.log(`  Raw components found: ${regions.length}`);
             
-            const minArea = (width * height) * 0.01;
-            const maxArea = (width * height) * 0.75;
+            const minArea = (width * height) * 0.005; // More lenient
+            const maxArea = (width * height) * 0.85;
             
             let valid = regions.filter(r => {
                 if (r.area < minArea || r.area > maxArea) return false;
-                if (r.w < 100 || r.h < 100) return false;
+                if (r.w < 50 || r.h < 50) return false; // More lenient
                 const aspectRatio = Math.max(r.w, r.h) / Math.min(r.w, r.h);
-                if (aspectRatio > 20) return false;
+                if (aspectRatio > 30) return false; // More lenient
                 return true;
             });
 
-            console.log(`  Found ${valid.length} valid regions`);
+            console.log(`  Valid regions: ${valid.length}`);
             return valid;
         }
 

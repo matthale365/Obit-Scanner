@@ -691,8 +691,18 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Detect obituaries using whitespace gap analysis
-            const regions = detectByWhitespaceGaps(gray, width, height);
+            // INVERT THE IMAGE
+            // White background → Black
+            // Newspaper gray → Light gray
+            // Text → Lighter
+            console.log('Inverting image...');
+            const inverted = new Uint8ClampedArray(width * height);
+            for (let i = 0; i < gray.length; i++) {
+                inverted[i] = 255 - gray[i];
+            }
+
+            // Detect obituaries on inverted image
+            const regions = detectByInvertedImage(inverted, width, height);
             
             if (regions.length === 0) {
                 console.log('No obituaries detected, returning full image');
@@ -706,7 +716,7 @@
 
             console.log(`\n✓ Final result: ${regions.length} obituaries`);
 
-            // Extract cards
+            // Extract cards from ORIGINAL image (not inverted)
             const cards = [];
             for (let i = 0; i < regions.length; i++) {
                 const region = regions[i];
@@ -732,6 +742,134 @@
             }
 
             return cards;
+        }
+
+        function detectByInvertedImage(inverted, width, height) {
+            console.log('Detecting obituaries on inverted image...');
+            console.log('(White background is now BLACK, obituaries are LIGHTER)');
+            
+            // On inverted image:
+            // - Black (0-40) = original white background
+            // - Light gray (40-100) = original newspaper/obituary background
+            // - Lighter (100+) = original text
+            
+            // Threshold to separate obituaries from background
+            const obituaryThreshold = 30; // Anything > 30 is potentially obituary content
+            
+            // Create binary: obituary regions = white, background = black
+            const binary = new Uint8ClampedArray(width * height);
+            for (let i = 0; i < inverted.length; i++) {
+                binary[i] = inverted[i] > obituaryThreshold ? 255 : 0;
+            }
+            
+            console.log('Performing morphology to connect obituary regions...');
+            
+            // Dilate to connect nearby obituary content
+            let morphed = binary.slice();
+            for (let iter = 0; iter < 5; iter++) {
+                morphed = morphDilate(morphed, width, height, 7);
+            }
+            
+            // Erode slightly to clean up edges
+            for (let iter = 0; iter < 2; iter++) {
+                morphed = morphErode(morphed, width, height, 5);
+            }
+            
+            // Find connected components (each should be an obituary)
+            console.log('Finding connected components...');
+            const components = findConnectedComponents(morphed, width, height);
+            console.log(`Found ${components.length} components`);
+            
+            // Filter components
+            const imageArea = width * height;
+            const candidates = [];
+            
+            for (const comp of components) {
+                const areaPercent = (comp.area / imageArea) * 100;
+                const aspectRatio = Math.max(comp.w, comp.h) / Math.min(comp.w, comp.h);
+                
+                console.log(`  Component: ${comp.w}x${comp.h} (${areaPercent.toFixed(1)}%) AR=${aspectRatio.toFixed(1)}`);
+                
+                // Filter criteria
+                const bigEnough = comp.w >= 200 && comp.h >= 200;
+                const notTooLarge = areaPercent < 85;
+                const notTooThin = aspectRatio < 30;
+                const notTooSmall = areaPercent > 0.5; // At least 0.5% of image
+                
+                if (bigEnough && notTooLarge && notTooThin && notTooSmall) {
+                    // Validate it has actual obituary content (newspaper gray + text)
+                    const validation = validateObituary(comp, inverted, width, height);
+                    
+                    if (validation.isValid) {
+                        candidates.push(comp);
+                        console.log(`    ✓ VALID (avg brightness: ${validation.avgBrightness.toFixed(1)})`);
+                    } else {
+                        console.log(`    ✗ REJECTED: ${validation.reason}`);
+                    }
+                } else {
+                    const reasons = [];
+                    if (!bigEnough) reasons.push('too small');
+                    if (!notTooLarge) reasons.push('too large');
+                    if (!notTooThin) reasons.push('bad aspect');
+                    if (!notTooSmall) reasons.push('tiny area');
+                    console.log(`    ✗ ${reasons.join(', ')}`);
+                }
+            }
+            
+            console.log(`${candidates.length} valid obituaries found`);
+            
+            // Sort by position
+            candidates.sort((a, b) => {
+                const yDiff = a.y - b.y;
+                if (Math.abs(yDiff) < height * 0.15) {
+                    return a.x - b.x;
+                }
+                return yDiff;
+            });
+            
+            return candidates;
+        }
+
+        function validateObituary(component, inverted, width, height) {
+            // Check if this component has characteristics of an obituary
+            // On inverted image, obituaries should have moderate brightness
+            // (newspaper gray background + some text)
+            
+            let totalBrightness = 0;
+            let pixelCount = 0;
+            let veryBright = 0; // Text pixels
+            
+            // Sample every 8 pixels
+            for (let y = component.y; y < component.y + component.h && y < height; y += 8) {
+                for (let x = component.x; x < component.x + component.w && x < width; x += 8) {
+                    const brightness = inverted[y * width + x];
+                    totalBrightness += brightness;
+                    pixelCount++;
+                    
+                    if (brightness > 100) veryBright++; // Original text (dark on original)
+                }
+            }
+            
+            const avgBrightness = totalBrightness / pixelCount;
+            const veryBrightRatio = veryBright / pixelCount;
+            
+            // Obituaries should have:
+            // - Average brightness 40-120 (newspaper gray on inverted)
+            // - At least 5% very bright pixels (text)
+            
+            if (avgBrightness < 40) {
+                return { isValid: false, reason: `too dark (avg=${avgBrightness.toFixed(1)})`, avgBrightness };
+            }
+            
+            if (avgBrightness > 150) {
+                return { isValid: false, reason: `too bright (avg=${avgBrightness.toFixed(1)})`, avgBrightness };
+            }
+            
+            if (veryBrightRatio < 0.05) {
+                return { isValid: false, reason: `insufficient text (${(veryBrightRatio*100).toFixed(1)}%)`, avgBrightness };
+            }
+            
+            return { isValid: true, avgBrightness };
         }
 
         function detectByWhitespaceGaps(gray, width, height) {

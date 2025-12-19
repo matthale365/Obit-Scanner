@@ -704,11 +704,15 @@
                 console.log(`\nMethod ${i + 1}:`);
                 const result = methods[i]();
                 if (result && result.length > 0) {
-                    allResults.push({
-                        method: i + 1,
-                        regions: result,
-                        score: scoreDetectionResult(result, width, height)
-                    });
+                    // Validate regions have substantial content
+                    const validated = validateRegionContent(result, gray, width, height);
+                    if (validated.length > 0) {
+                        allResults.push({
+                            method: i + 1,
+                            regions: validated,
+                            score: scoreDetectionResult(validated, width, height)
+                        });
+                    }
                 }
             }
 
@@ -751,6 +755,95 @@
             }
 
             return cards;
+        }
+
+        // Validate that regions contain substantial content, not just faint lines or labels
+        function validateRegionContent(regions, gray, width, height) {
+            console.log(`\n  Validating ${regions.length} regions for substantial content...`);
+            
+            const validated = [];
+            
+            for (const region of regions) {
+                // Sample pixels throughout the region
+                let darkPixels = 0;
+                let veryDarkPixels = 0;
+                let totalSampled = 0;
+                
+                // Sample every 5 pixels in a grid
+                for (let y = region.y; y < region.y + region.h; y += 5) {
+                    for (let x = region.x; x < region.x + region.w; x += 5) {
+                        if (x >= width || y >= height) continue;
+                        
+                        const pixelValue = gray[y * width + x];
+                        totalSampled++;
+                        
+                        if (pixelValue < 200) darkPixels++; // Somewhat dark
+                        if (pixelValue < 150) veryDarkPixels++; // Actually dark (text)
+                    }
+                }
+                
+                const darkRatio = darkPixels / totalSampled;
+                const veryDarkRatio = veryDarkPixels / totalSampled;
+                
+                // Check for substantial text content
+                // Obituaries should have at least 8% very dark pixels (actual text)
+                // and at least 15% dark pixels overall
+                const hasSubstantialText = veryDarkRatio > 0.08 && darkRatio > 0.15;
+                
+                // Additional check: not mostly whitespace
+                const notMostlyWhite = darkRatio < 0.95;
+                
+                // Check for edge-only content (faint borders, no interior content)
+                const hasInteriorContent = checkInteriorContent(region, gray, width, height);
+                
+                console.log(`    Region ${region.w}x${region.h}: dark=${(darkRatio*100).toFixed(1)}% veryDark=${(veryDarkRatio*100).toFixed(1)}% interior=${hasInteriorContent}`);
+                
+                if (hasSubstantialText && notMostlyWhite && hasInteriorContent) {
+                    validated.push(region);
+                    console.log(`      ✓ VALID`);
+                } else {
+                    const reasons = [];
+                    if (!hasSubstantialText) reasons.push('insufficient text');
+                    if (!notMostlyWhite) reasons.push('mostly white');
+                    if (!hasInteriorContent) reasons.push('no interior content');
+                    console.log(`      ✗ REJECTED: ${reasons.join(', ')}`);
+                }
+            }
+            
+            console.log(`  ${validated.length} regions passed validation`);
+            return validated;
+        }
+
+        // Check if region has content in its interior (not just edges)
+        function checkInteriorContent(region, gray, width, height) {
+            // Define interior as 20% margin from edges
+            const marginX = Math.floor(region.w * 0.2);
+            const marginY = Math.floor(region.h * 0.2);
+            
+            const interiorX1 = region.x + marginX;
+            const interiorY1 = region.y + marginY;
+            const interiorX2 = region.x + region.w - marginX;
+            const interiorY2 = region.y + region.h - marginY;
+            
+            if (interiorX2 <= interiorX1 || interiorY2 <= interiorY1) {
+                return true; // Region too small to have meaningful interior, accept it
+            }
+            
+            // Sample interior
+            let darkPixels = 0;
+            let totalSampled = 0;
+            
+            for (let y = interiorY1; y < interiorY2; y += 10) {
+                for (let x = interiorX1; x < interiorX2; x += 10) {
+                    if (x >= width || y >= height) continue;
+                    
+                    if (gray[y * width + x] < 180) darkPixels++;
+                    totalSampled++;
+                }
+            }
+            
+            // Interior should have at least 5% dark content
+            return totalSampled > 0 && (darkPixels / totalSampled) > 0.05;
         }
 
         // METHOD 1: Contour detection with gap analysis

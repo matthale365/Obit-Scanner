@@ -691,7 +691,7 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Detect obituaries using morphological closing + object detection
+            // Detect obituaries using morphological closing
             const regions = detectObituariesMorphological(gray, width, height);
             
             if (regions.length === 0) {
@@ -706,7 +706,7 @@
 
             console.log(`\n✓ Final result: ${regions.length} obituaries detected`);
 
-            // Extract cards from original image
+            // Extract cards
             const cards = [];
             for (let i = 0; i < regions.length; i++) {
                 const region = regions[i];
@@ -735,148 +735,204 @@
         }
 
         function detectObituariesMorphological(gray, width, height) {
-            console.log('Starting morphological object detection...');
+            console.log('Starting morphological blob detection...');
+            console.log('Strategy: Convert each obituary into a solid blob\n');
             
-            // Step 1: Adaptive thresholding for better text detection
-            console.log('Step 1: Adaptive thresholding...');
-            const binary = adaptiveThreshold(gray, width, height, 41, 15);
+            // Step 1: Binary thresholding
+            console.log('Step 1: Binary thresholding...');
+            const threshold = 180;
+            const binary = new Uint8ClampedArray(width * height);
             
-            // Count dark pixels for debugging
+            for (let i = 0; i < gray.length; i++) {
+                binary[i] = gray[i] < threshold ? 255 : 0;
+            }
+            
             let darkCount = 0;
             for (let i = 0; i < binary.length; i++) {
                 if (binary[i] === 255) darkCount++;
             }
-            console.log(`  ${darkCount} dark pixels (${(darkCount/binary.length*100).toFixed(1)}%)`);
+            console.log(`  ${darkCount} text pixels (${(darkCount/binary.length*100).toFixed(1)}%)\n`);
             
-            // Step 2: Morphological CLOSING (dilation then erosion)
-            // This fills small gaps in text, making each obituary a solid blob
-            console.log('Step 2: Morphological closing...');
+            // Step 2: Morphological CLOSING with RECTANGULAR kernel
+            console.log('Step 2: Morphological closing (blob creation)...');
             
-            // Large dilation to connect all text in each obituary
+            // Large rectangular kernel - vertical bias to merge dates above
+            const dilateKernelW = 15;
+            const dilateKernelH = 20;
+            const dilateIterations = 8;
+            
+            console.log(`  Dilating: ${dilateIterations} iterations`);
+            console.log(`    Kernel: ${dilateKernelW}x${dilateKernelH} (rectangular, vertical bias)`);
+            
             let morphed = binary.slice();
-            const dilateIterations = 12;
-            const dilateKernel = 11;
-            console.log(`  Dilating: ${dilateIterations} iterations, ${dilateKernel}x${dilateKernel} kernel`);
-            
             for (let iter = 0; iter < dilateIterations; iter++) {
-                morphed = morphDilate(morphed, width, height, dilateKernel);
+                morphed = morphDilateRect(morphed, width, height, dilateKernelW, dilateKernelH);
             }
             
-            // Erosion to shrink back to proper boundaries
-            const erodeIterations = 6;
-            const erodeKernel = 9;
-            console.log(`  Eroding: ${erodeIterations} iterations, ${erodeKernel}x${erodeKernel} kernel`);
+            // Erosion to clean boundaries
+            const erodeKernel = 7;
+            const erodeIterations = 4;
+            console.log(`  Eroding: ${erodeIterations} iterations, ${erodeKernel}x${erodeKernel} kernel\n`);
             
             for (let iter = 0; iter < erodeIterations; iter++) {
                 morphed = morphErode(morphed, width, height, erodeKernel);
             }
             
-            // Step 3: Object detection - find connected components
-            console.log('Step 3: Finding objects (connected components)...');
-            const objects = findConnectedComponents(morphed, width, height);
-            console.log(`  Found ${objects.length} objects`);
+            // Step 3: Find contours
+            console.log('Step 3: Contour detection...');
+            const contours = findConnectedComponents(morphed, width, height);
+            console.log(`  Found ${contours.length} contours\n`);
             
-            // Step 4: Filter objects to find obituaries
-            console.log('Step 4: Filtering objects...');
-            const obituaries = filterObjects(objects, gray, width, height);
+            // Step 4: Filter by area
+            console.log('Step 4: Area filtering...');
+            const imageArea = width * height;
+            const minArea = imageArea * 0.003;
+            const maxArea = imageArea * 0.85;
             
-            // Step 5: Sort by position
-            obituaries.sort((a, b) => {
-                const yDiff = a.y - b.y;
-                if (Math.abs(yDiff) < height * 0.12) {
-                    return a.x - b.x;
+            const filtered = contours.filter(c => {
+                const keep = c.area >= minArea && c.area <= maxArea;
+                if (!keep) {
+                    const percent = (c.area/imageArea*100).toFixed(2);
+                    console.log(`  Skip: ${c.w}x${c.h} (${percent}%)`);
                 }
-                return yDiff;
+                return keep;
             });
             
-            console.log(`Found ${obituaries.length} obituaries after filtering`);
-            return obituaries;
-        }
-
-        function adaptiveThreshold(gray, width, height, blockSize, C) {
-            // Adaptive thresholding - calculates threshold for each pixel based on local region
-            const binary = new Uint8ClampedArray(width * height);
-            const halfBlock = Math.floor(blockSize / 2);
+            console.log(`  ${filtered.length} contours passed area filter\n`);
             
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    // Calculate mean of local region
-                    let sum = 0;
-                    let count = 0;
-                    
-                    for (let by = -halfBlock; by <= halfBlock; by++) {
-                        for (let bx = -halfBlock; bx <= halfBlock; bx++) {
-                            const ny = y + by;
-                            const nx = x + bx;
-                            
-                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                                sum += gray[ny * width + nx];
-                                count++;
-                            }
-                        }
-                    }
-                    
-                    const mean = sum / count;
-                    const threshold = mean - C; // Subtract constant
-                    
-                    // If pixel is darker than threshold, mark as foreground
-                    binary[y * width + x] = gray[y * width + x] < threshold ? 255 : 0;
-                }
-            }
+            // Step 5: Proximity merging (dates/labels above obituaries)
+            console.log('Step 5: Proximity merging...');
+            const merged = mergeProximityContours(filtered, width, height);
             
-            return binary;
-        }
-
-        function filterObjects(objects, gray, width, height) {
-            const imageArea = width * height;
+            // Step 6: Final validation
+            console.log('\nStep 6: Final validation...');
             const valid = [];
             
-            for (const obj of objects) {
-                const areaPercent = (obj.area / imageArea) * 100;
-                const aspectRatio = Math.max(obj.w, obj.h) / Math.min(obj.w, obj.h);
+            for (const contour of merged) {
+                const areaPercent = (contour.area / imageArea) * 100;
+                const aspectRatio = Math.max(contour.w, contour.h) / Math.min(contour.w, contour.h);
                 
-                console.log(`  Object: ${obj.w}x${obj.h} at (${obj.x},${obj.y}) - ${areaPercent.toFixed(1)}% area, AR=${aspectRatio.toFixed(1)}`);
+                console.log(`  Contour: ${contour.w}x${contour.h} at (${contour.x},${contour.y})`);
+                console.log(`    Area: ${areaPercent.toFixed(1)}%, Aspect: ${aspectRatio.toFixed(1)}`);
                 
-                // Size filters
-                const minSize = 180;
-                const bigEnough = obj.w >= minSize && obj.h >= minSize;
-                const notTooLarge = areaPercent < 88;
-                const notTooSmall = areaPercent > 0.3;
-                const goodAspect = aspectRatio < 35;
-                
-                if (!bigEnough) {
-                    console.log(`    ✗ Too small (need ${minSize}x${minSize})`);
+                if (contour.w < 150 || contour.h < 150) {
+                    console.log(`    ✗ Too small`);
                     continue;
                 }
                 
-                if (!notTooLarge) {
-                    console.log(`    ✗ Too large (${areaPercent.toFixed(1)}%)`);
+                if (aspectRatio > 40) {
+                    console.log(`    ✗ Bad aspect ratio`);
                     continue;
                 }
                 
-                if (!notTooSmall) {
-                    console.log(`    ✗ Tiny area (${areaPercent.toFixed(1)}%)`);
-                    continue;
-                }
-                
-                if (!goodAspect) {
-                    console.log(`    ✗ Bad aspect ratio (${aspectRatio.toFixed(1)})`);
-                    continue;
-                }
-                
-                // Content validation - check if it has actual text density
-                const contentCheck = validateContent(obj, gray, width, height);
-                
+                const contentCheck = validateContent(contour, gray, width, height);
                 if (!contentCheck.isValid) {
                     console.log(`    ✗ ${contentCheck.reason}`);
                     continue;
                 }
                 
                 console.log(`    ✓ VALID (density: ${(contentCheck.density*100).toFixed(1)}%)`);
-                valid.push(obj);
+                valid.push(contour);
             }
             
+            valid.sort((a, b) => {
+                const yDiff = a.y - b.y;
+                if (Math.abs(yDiff) < height * 0.12) return a.x - b.x;
+                return yDiff;
+            });
+            
+            console.log(`\n✓ Found ${valid.length} obituaries`);
             return valid;
+        }
+
+        function morphDilateRect(binary, width, height, kernelW, kernelH) {
+            const output = new Uint8ClampedArray(width * height);
+            const halfW = Math.floor(kernelW / 2);
+            const halfH = Math.floor(kernelH / 2);
+            
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let maxVal = 0;
+                    
+                    for (let ky = -halfH; ky <= halfH; ky++) {
+                        for (let kx = -halfW; kx <= halfW; kx++) {
+                            const ny = y + ky;
+                            const nx = x + kx;
+                            
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                maxVal = Math.max(maxVal, binary[ny * width + nx]);
+                            }
+                        }
+                    }
+                    
+                    output[y * width + x] = maxVal;
+                }
+            }
+            
+            return output;
+        }
+
+        function mergeProximityContours(contours, width, height) {
+            if (contours.length === 0) return [];
+            
+            const proximityY = Math.min(100, height * 0.04);
+            const proximityX = Math.min(150, width * 0.08);
+            
+            console.log(`  Thresholds: X=${proximityX.toFixed(0)}px, Y=${proximityY.toFixed(0)}px`);
+            
+            const merged = [];
+            const used = new Set();
+            const sorted = contours.slice().sort((a, b) => b.area - a.area);
+            
+            for (let i = 0; i < sorted.length; i++) {
+                if (used.has(i)) continue;
+                
+                const parent = sorted[i];
+                const children = [];
+                
+                for (let j = 0; j < sorted.length; j++) {
+                    if (i === j || used.has(j)) continue;
+                    
+                    const child = sorted[j];
+                    const isAbove = child.y + child.h <= parent.y + proximityY;
+                    const xOverlap = Math.min(parent.x + parent.w, child.x + child.w) - 
+                                    Math.max(parent.x, child.x);
+                    const hasXOverlap = xOverlap > -proximityX;
+                    const isMuchSmaller = child.area < parent.area * 0.3;
+                    
+                    if (isAbove && hasXOverlap && isMuchSmaller) {
+                        children.push(j);
+                        console.log(`  Merging (${child.x},${child.y}) into (${parent.x},${parent.y})`);
+                    }
+                }
+                
+                if (children.length > 0) {
+                    let minX = parent.x, minY = parent.y;
+                    let maxX = parent.x + parent.w, maxY = parent.y + parent.h;
+                    
+                    for (const childIdx of children) {
+                        const child = sorted[childIdx];
+                        minX = Math.min(minX, child.x);
+                        minY = Math.min(minY, child.y);
+                        maxX = Math.max(maxX, child.x + child.w);
+                        maxY = Math.max(maxY, child.y + child.h);
+                        used.add(childIdx);
+                    }
+                    
+                    merged.push({
+                        x: minX, y: minY,
+                        w: maxX - minX, h: maxY - minY,
+                        area: (maxX - minX) * (maxY - minY)
+                    });
+                } else {
+                    merged.push(parent);
+                }
+                
+                used.add(i);
+            }
+            
+            console.log(`  ${merged.length} after merging`);
+            return merged;
         }
 
         function validateContent(obj, gray, width, height) {
@@ -888,14 +944,13 @@
             for (let y = obj.y; y < obj.y + obj.h && y < height; y += 8) {
                 for (let x = obj.x; x < obj.x + obj.w && x < width; x += 8) {
                     const pixel = gray[y * width + x];
-                    if (pixel < 180) darkPixels++; // Text-like
+                    if (pixel < 180) darkPixels++;
                     totalSampled++;
                 }
             }
             
             const density = darkPixels / totalSampled;
             
-            // Obituaries should have at least 3% text density
             if (density < 0.03) {
                 return { 
                     isValid: false, 
@@ -904,12 +959,12 @@
                 };
             }
             
-            // Check for interior content (not just borders)
+            // Check for interior content
             const hasInterior = checkInteriorContent(obj, gray, width, height);
             if (!hasInterior) {
                 return { 
                     isValid: false, 
-                    reason: 'No interior content (empty box)',
+                    reason: 'No interior content',
                     density 
                 };
             }
@@ -918,7 +973,6 @@
         }
 
         function checkInteriorContent(obj, gray, width, height) {
-            // Check 25% margin from edges
             const marginX = Math.floor(obj.w * 0.25);
             const marginY = Math.floor(obj.h * 0.25);
             
@@ -928,10 +982,9 @@
             const interiorY2 = obj.y + obj.h - marginY;
             
             if (interiorX2 <= interiorX1 || interiorY2 <= interiorY1) {
-                return true; // Too small to have interior
+                return true;
             }
             
-            // Sample interior
             let darkPixels = 0;
             let totalSampled = 0;
             
@@ -942,8 +995,96 @@
                 }
             }
             
-            // Interior should have at least 2% dark content
             return totalSampled > 0 && (darkPixels / totalSampled) > 0.02;
+        }
+
+        function checkTextDensity(obj, gray, width, height) {
+            let darkPixels = 0;
+            let totalSampled = 0;
+            
+            for (let y = obj.y; y < obj.y + obj.h && y < height; y += 10) {
+                for (let x = obj.x; x < obj.x + obj.w && x < width; x += 10) {
+                    if (gray[y * width + x] < 180) darkPixels++;
+                    totalSampled++;
+                }
+            }
+            
+            return darkPixels / totalSampled;
+        }
+            }
+            
+            // Find significant horizontal gaps (white rows)
+            const gapThreshold = 2; // Very few dark pixels
+            const minGapSize = 25;
+            const gaps = [];
+            
+            let inGap = false;
+            let gapStart = 0;
+            
+            for (let dy = 0; dy < obj.h; dy++) {
+                if (rowDensity[dy] < gapThreshold) {
+                    if (!inGap) {
+                        gapStart = dy;
+                        inGap = true;
+                    }
+                } else {
+                    if (inGap && (dy - gapStart) >= minGapSize) {
+                        gaps.push({ start: gapStart, end: dy });
+                    }
+                    inGap = false;
+                }
+            }
+            
+            if (gaps.length === 0) {
+                return [obj]; // Can't split
+            }
+            
+            console.log(`        Found ${gaps.length} horizontal gaps`);
+            
+            // Split at gaps
+            const pieces = [];
+            let lastEnd = 0;
+            
+            for (const gap of gaps) {
+                if (gap.start - lastEnd > 100) {
+                    pieces.push({
+                        x: obj.x,
+                        y: obj.y + lastEnd,
+                        w: obj.w,
+                        h: gap.start - lastEnd,
+                        area: obj.w * (gap.start - lastEnd)
+                    });
+                }
+                lastEnd = gap.end;
+            }
+            
+            // Add final piece
+            if (obj.h - lastEnd > 100) {
+                pieces.push({
+                    x: obj.x,
+                    y: obj.y + lastEnd,
+                    w: obj.w,
+                    h: obj.h - lastEnd,
+                    area: obj.w * (obj.h - lastEnd)
+                });
+            }
+            
+            return pieces.length > 0 ? pieces : [obj];
+        }
+
+        function checkTextDensity(obj, gray, width, height) {
+            let darkPixels = 0;
+            let totalSampled = 0;
+            
+            // Sample every 10 pixels
+            for (let y = obj.y; y < obj.y + obj.h && y < height; y += 10) {
+                for (let x = obj.x; x < obj.x + obj.w && x < width; x += 10) {
+                    if (gray[y * width + x] < 180) darkPixels++;
+                    totalSampled++;
+                }
+            }
+            
+            return darkPixels / totalSampled;
         }
 
         function detectByWhitespaceGaps(gray, width, height) {

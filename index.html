@@ -691,18 +691,8 @@
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // INVERT THE IMAGE
-            // White background → Black
-            // Newspaper gray → Light gray
-            // Text → Lighter
-            console.log('Inverting image...');
-            const inverted = new Uint8ClampedArray(width * height);
-            for (let i = 0; i < gray.length; i++) {
-                inverted[i] = 255 - gray[i];
-            }
-
-            // Detect obituaries on inverted image
-            const regions = detectByInvertedImage(inverted, width, height);
+            // Detect obituaries using morphological closing + object detection
+            const regions = detectObituariesMorphological(gray, width, height);
             
             if (regions.length === 0) {
                 console.log('No obituaries detected, returning full image');
@@ -714,13 +704,13 @@
                 }];
             }
 
-            console.log(`\n✓ Final result: ${regions.length} obituaries`);
+            console.log(`\n✓ Final result: ${regions.length} obituaries detected`);
 
-            // Extract cards from ORIGINAL image (not inverted)
+            // Extract cards from original image
             const cards = [];
             for (let i = 0; i < regions.length; i++) {
                 const region = regions[i];
-                const padding = 20;
+                const padding = 25;
                 const x = Math.max(0, region.x - padding);
                 const y = Math.max(0, region.y - padding);
                 const w = Math.min(width - x, region.w + 2 * padding);
@@ -744,132 +734,216 @@
             return cards;
         }
 
-        function detectByInvertedImage(inverted, width, height) {
-            console.log('Detecting obituaries on inverted image...');
-            console.log('(White background is now BLACK, obituaries are LIGHTER)');
+        function detectObituariesMorphological(gray, width, height) {
+            console.log('Starting morphological object detection...');
             
-            // On inverted image:
-            // - Black (0-40) = original white background
-            // - Light gray (40-100) = original newspaper/obituary background
-            // - Lighter (100+) = original text
+            // Step 1: Adaptive thresholding for better text detection
+            console.log('Step 1: Adaptive thresholding...');
+            const binary = adaptiveThreshold(gray, width, height, 41, 15);
             
-            // Threshold to separate obituaries from background
-            const obituaryThreshold = 30; // Anything > 30 is potentially obituary content
-            
-            // Create binary: obituary regions = white, background = black
-            const binary = new Uint8ClampedArray(width * height);
-            for (let i = 0; i < inverted.length; i++) {
-                binary[i] = inverted[i] > obituaryThreshold ? 255 : 0;
+            // Count dark pixels for debugging
+            let darkCount = 0;
+            for (let i = 0; i < binary.length; i++) {
+                if (binary[i] === 255) darkCount++;
             }
+            console.log(`  ${darkCount} dark pixels (${(darkCount/binary.length*100).toFixed(1)}%)`);
             
-            console.log('Performing morphology to connect obituary regions...');
+            // Step 2: Morphological CLOSING (dilation then erosion)
+            // This fills small gaps in text, making each obituary a solid blob
+            console.log('Step 2: Morphological closing...');
             
-            // Dilate to connect nearby obituary content
+            // Large dilation to connect all text in each obituary
             let morphed = binary.slice();
-            for (let iter = 0; iter < 5; iter++) {
-                morphed = morphDilate(morphed, width, height, 7);
+            const dilateIterations = 12;
+            const dilateKernel = 11;
+            console.log(`  Dilating: ${dilateIterations} iterations, ${dilateKernel}x${dilateKernel} kernel`);
+            
+            for (let iter = 0; iter < dilateIterations; iter++) {
+                morphed = morphDilate(morphed, width, height, dilateKernel);
             }
             
-            // Erode slightly to clean up edges
-            for (let iter = 0; iter < 2; iter++) {
-                morphed = morphErode(morphed, width, height, 5);
+            // Erosion to shrink back to proper boundaries
+            const erodeIterations = 6;
+            const erodeKernel = 9;
+            console.log(`  Eroding: ${erodeIterations} iterations, ${erodeKernel}x${erodeKernel} kernel`);
+            
+            for (let iter = 0; iter < erodeIterations; iter++) {
+                morphed = morphErode(morphed, width, height, erodeKernel);
             }
             
-            // Find connected components (each should be an obituary)
-            console.log('Finding connected components...');
-            const components = findConnectedComponents(morphed, width, height);
-            console.log(`Found ${components.length} components`);
+            // Step 3: Object detection - find connected components
+            console.log('Step 3: Finding objects (connected components)...');
+            const objects = findConnectedComponents(morphed, width, height);
+            console.log(`  Found ${objects.length} objects`);
             
-            // Filter components
-            const imageArea = width * height;
-            const candidates = [];
+            // Step 4: Filter objects to find obituaries
+            console.log('Step 4: Filtering objects...');
+            const obituaries = filterObjects(objects, gray, width, height);
             
-            for (const comp of components) {
-                const areaPercent = (comp.area / imageArea) * 100;
-                const aspectRatio = Math.max(comp.w, comp.h) / Math.min(comp.w, comp.h);
-                
-                console.log(`  Component: ${comp.w}x${comp.h} (${areaPercent.toFixed(1)}%) AR=${aspectRatio.toFixed(1)}`);
-                
-                // Filter criteria
-                const bigEnough = comp.w >= 200 && comp.h >= 200;
-                const notTooLarge = areaPercent < 85;
-                const notTooThin = aspectRatio < 30;
-                const notTooSmall = areaPercent > 0.5; // At least 0.5% of image
-                
-                if (bigEnough && notTooLarge && notTooThin && notTooSmall) {
-                    // Validate it has actual obituary content (newspaper gray + text)
-                    const validation = validateObituary(comp, inverted, width, height);
-                    
-                    if (validation.isValid) {
-                        candidates.push(comp);
-                        console.log(`    ✓ VALID (avg brightness: ${validation.avgBrightness.toFixed(1)})`);
-                    } else {
-                        console.log(`    ✗ REJECTED: ${validation.reason}`);
-                    }
-                } else {
-                    const reasons = [];
-                    if (!bigEnough) reasons.push('too small');
-                    if (!notTooLarge) reasons.push('too large');
-                    if (!notTooThin) reasons.push('bad aspect');
-                    if (!notTooSmall) reasons.push('tiny area');
-                    console.log(`    ✗ ${reasons.join(', ')}`);
-                }
-            }
-            
-            console.log(`${candidates.length} valid obituaries found`);
-            
-            // Sort by position
-            candidates.sort((a, b) => {
+            // Step 5: Sort by position
+            obituaries.sort((a, b) => {
                 const yDiff = a.y - b.y;
-                if (Math.abs(yDiff) < height * 0.15) {
+                if (Math.abs(yDiff) < height * 0.12) {
                     return a.x - b.x;
                 }
                 return yDiff;
             });
             
-            return candidates;
+            console.log(`Found ${obituaries.length} obituaries after filtering`);
+            return obituaries;
         }
 
-        function validateObituary(component, inverted, width, height) {
-            // Check if this component has characteristics of an obituary
-            // On inverted image, obituaries should have moderate brightness
-            // (newspaper gray background + some text)
+        function adaptiveThreshold(gray, width, height, blockSize, C) {
+            // Adaptive thresholding - calculates threshold for each pixel based on local region
+            const binary = new Uint8ClampedArray(width * height);
+            const halfBlock = Math.floor(blockSize / 2);
             
-            let totalBrightness = 0;
-            let pixelCount = 0;
-            let veryBright = 0; // Text pixels
-            
-            // Sample every 8 pixels
-            for (let y = component.y; y < component.y + component.h && y < height; y += 8) {
-                for (let x = component.x; x < component.x + component.w && x < width; x += 8) {
-                    const brightness = inverted[y * width + x];
-                    totalBrightness += brightness;
-                    pixelCount++;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    // Calculate mean of local region
+                    let sum = 0;
+                    let count = 0;
                     
-                    if (brightness > 100) veryBright++; // Original text (dark on original)
+                    for (let by = -halfBlock; by <= halfBlock; by++) {
+                        for (let bx = -halfBlock; bx <= halfBlock; bx++) {
+                            const ny = y + by;
+                            const nx = x + bx;
+                            
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                sum += gray[ny * width + nx];
+                                count++;
+                            }
+                        }
+                    }
+                    
+                    const mean = sum / count;
+                    const threshold = mean - C; // Subtract constant
+                    
+                    // If pixel is darker than threshold, mark as foreground
+                    binary[y * width + x] = gray[y * width + x] < threshold ? 255 : 0;
                 }
             }
             
-            const avgBrightness = totalBrightness / pixelCount;
-            const veryBrightRatio = veryBright / pixelCount;
+            return binary;
+        }
+
+        function filterObjects(objects, gray, width, height) {
+            const imageArea = width * height;
+            const valid = [];
             
-            // Obituaries should have:
-            // - Average brightness 40-120 (newspaper gray on inverted)
-            // - At least 5% very bright pixels (text)
-            
-            if (avgBrightness < 40) {
-                return { isValid: false, reason: `too dark (avg=${avgBrightness.toFixed(1)})`, avgBrightness };
+            for (const obj of objects) {
+                const areaPercent = (obj.area / imageArea) * 100;
+                const aspectRatio = Math.max(obj.w, obj.h) / Math.min(obj.w, obj.h);
+                
+                console.log(`  Object: ${obj.w}x${obj.h} at (${obj.x},${obj.y}) - ${areaPercent.toFixed(1)}% area, AR=${aspectRatio.toFixed(1)}`);
+                
+                // Size filters
+                const minSize = 180;
+                const bigEnough = obj.w >= minSize && obj.h >= minSize;
+                const notTooLarge = areaPercent < 88;
+                const notTooSmall = areaPercent > 0.3;
+                const goodAspect = aspectRatio < 35;
+                
+                if (!bigEnough) {
+                    console.log(`    ✗ Too small (need ${minSize}x${minSize})`);
+                    continue;
+                }
+                
+                if (!notTooLarge) {
+                    console.log(`    ✗ Too large (${areaPercent.toFixed(1)}%)`);
+                    continue;
+                }
+                
+                if (!notTooSmall) {
+                    console.log(`    ✗ Tiny area (${areaPercent.toFixed(1)}%)`);
+                    continue;
+                }
+                
+                if (!goodAspect) {
+                    console.log(`    ✗ Bad aspect ratio (${aspectRatio.toFixed(1)})`);
+                    continue;
+                }
+                
+                // Content validation - check if it has actual text density
+                const contentCheck = validateContent(obj, gray, width, height);
+                
+                if (!contentCheck.isValid) {
+                    console.log(`    ✗ ${contentCheck.reason}`);
+                    continue;
+                }
+                
+                console.log(`    ✓ VALID (density: ${(contentCheck.density*100).toFixed(1)}%)`);
+                valid.push(obj);
             }
             
-            if (avgBrightness > 150) {
-                return { isValid: false, reason: `too bright (avg=${avgBrightness.toFixed(1)})`, avgBrightness };
+            return valid;
+        }
+
+        function validateContent(obj, gray, width, height) {
+            // Check if object has substantial text content
+            let darkPixels = 0;
+            let totalSampled = 0;
+            
+            // Sample every 8 pixels
+            for (let y = obj.y; y < obj.y + obj.h && y < height; y += 8) {
+                for (let x = obj.x; x < obj.x + obj.w && x < width; x += 8) {
+                    const pixel = gray[y * width + x];
+                    if (pixel < 180) darkPixels++; // Text-like
+                    totalSampled++;
+                }
             }
             
-            if (veryBrightRatio < 0.05) {
-                return { isValid: false, reason: `insufficient text (${(veryBrightRatio*100).toFixed(1)}%)`, avgBrightness };
+            const density = darkPixels / totalSampled;
+            
+            // Obituaries should have at least 3% text density
+            if (density < 0.03) {
+                return { 
+                    isValid: false, 
+                    reason: `Low text density (${(density*100).toFixed(1)}%)`,
+                    density 
+                };
             }
             
-            return { isValid: true, avgBrightness };
+            // Check for interior content (not just borders)
+            const hasInterior = checkInteriorContent(obj, gray, width, height);
+            if (!hasInterior) {
+                return { 
+                    isValid: false, 
+                    reason: 'No interior content (empty box)',
+                    density 
+                };
+            }
+            
+            return { isValid: true, density };
+        }
+
+        function checkInteriorContent(obj, gray, width, height) {
+            // Check 25% margin from edges
+            const marginX = Math.floor(obj.w * 0.25);
+            const marginY = Math.floor(obj.h * 0.25);
+            
+            const interiorX1 = obj.x + marginX;
+            const interiorY1 = obj.y + marginY;
+            const interiorX2 = obj.x + obj.w - marginX;
+            const interiorY2 = obj.y + obj.h - marginY;
+            
+            if (interiorX2 <= interiorX1 || interiorY2 <= interiorY1) {
+                return true; // Too small to have interior
+            }
+            
+            // Sample interior
+            let darkPixels = 0;
+            let totalSampled = 0;
+            
+            for (let y = interiorY1; y < interiorY2 && y < height; y += 12) {
+                for (let x = interiorX1; x < interiorX2 && x < width; x += 12) {
+                    if (gray[y * width + x] < 190) darkPixels++;
+                    totalSampled++;
+                }
+            }
+            
+            // Interior should have at least 2% dark content
+            return totalSampled > 0 && (darkPixels / totalSampled) > 0.02;
         }
 
         function detectByWhitespaceGaps(gray, width, height) {

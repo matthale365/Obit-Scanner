@@ -694,9 +694,9 @@
             }
 
             // Step 2: HEAVY Gaussian Blur (make letters disappear!)
-            console.log('Step 2: Applying heavy Gaussian blur...');
+            console.log('Step 2: Applying Gaussian blur...');
             console.log('  (Blurring until individual letters disappear)');
-            const blurred = gaussianBlur(gray, width, height, 25); // Large radius
+            const blurred = gaussianBlur(gray, width, height, 15); // Reduced from 25 to 15
 
             // Step 3: Invert (text becomes white, background becomes black)
             console.log('Step 3: Inverting image...');
@@ -708,7 +708,7 @@
             // Step 4: Threshold (turn grey clouds into solid black blocks)
             console.log('Step 4: Thresholding...');
             const binary = new Uint8ClampedArray(width * height);
-            const threshold = 30; // Low threshold - anything not pure white becomes black
+            const threshold = 25; // Lower threshold to catch fainter boundaries
             
             for (let i = 0; i < inverted.length; i++) {
                 binary[i] = inverted[i] > threshold ? 255 : 0;
@@ -842,7 +842,7 @@
 
         function filterAndSortBoxes(contours, width, height) {
             const imageArea = width * height;
-            const valid = [];
+            let valid = [];
 
             for (const box of contours) {
                 const areaPercent = (box.area / imageArea) * 100;
@@ -871,6 +871,20 @@
                     continue;
                 }
 
+                // Check if box might be multiple obituaries merged
+                if (areaPercent > 25 || aspectRatio > 3.5) {
+                    console.log(`    ! Large/tall box - checking for merged obituaries...`);
+                    const splitBoxes = trySplitBox(box, width, height);
+                    
+                    if (splitBoxes.length > 1) {
+                        console.log(`    ✓ Split into ${splitBoxes.length} pieces`);
+                        valid.push(...splitBoxes);
+                        continue;
+                    } else {
+                        console.log(`    - Could not split, keeping as one`);
+                    }
+                }
+
                 console.log(`    ✓ VALID`);
                 valid.push(box);
             }
@@ -885,6 +899,76 @@
             });
 
             return valid;
+        }
+
+        function trySplitBox(box, imgWidth, imgHeight) {
+            // Try to split a large box by finding horizontal whitespace gaps
+            // This catches obituaries that got merged because they touch
+            
+            console.log(`      Analyzing for splits...`);
+            
+            // Look for horizontal white strips (gaps between obituaries)
+            const minGapHeight = 15; // At least 15px of whitespace
+            const whiteThreshold = 0.90; // 90% white = gap
+            
+            const rowWhiteness = new Float32Array(box.h);
+            
+            // We need access to the original gray image, but we don't have it here
+            // Instead, use a simpler heuristic: split very tall boxes in half
+            
+            const aspectRatio = Math.max(box.w, box.h) / Math.min(box.w, box.h);
+            
+            // If aspect ratio > 3.5, likely stacked obituaries
+            if (aspectRatio > 3.5 && box.h > box.w) {
+                // Split vertically in half
+                console.log(`      Splitting tall box (AR=${aspectRatio.toFixed(1)})`);
+                
+                const midY = Math.floor(box.h / 2);
+                
+                return [
+                    {
+                        x: box.x,
+                        y: box.y,
+                        w: box.w,
+                        h: midY,
+                        area: box.w * midY
+                    },
+                    {
+                        x: box.x,
+                        y: box.y + midY,
+                        w: box.w,
+                        h: box.h - midY,
+                        area: box.w * (box.h - midY)
+                    }
+                ];
+            }
+            
+            // If very wide, split horizontally
+            if (aspectRatio > 3.5 && box.w > box.h) {
+                console.log(`      Splitting wide box (AR=${aspectRatio.toFixed(1)})`);
+                
+                const midX = Math.floor(box.w / 2);
+                
+                return [
+                    {
+                        x: box.x,
+                        y: box.y,
+                        w: midX,
+                        h: box.h,
+                        area: midX * box.h
+                    },
+                    {
+                        x: box.x + midX,
+                        y: box.y,
+                        w: box.w - midX,
+                        h: box.h,
+                        area: (box.w - midX) * box.h
+                    }
+                ];
+            }
+            
+            // Can't split
+            return [box];
         }
 
         function findConnectedComponents(binary, width, height) {

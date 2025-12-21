@@ -1277,6 +1277,18 @@
             updateProgress(75, 'Extracting key information...');
             for (let i = 0; i < allObituaries.length; i++) {
                 allObituaries[i].facts = extractFacts(allObituaries[i].text);
+                
+                // ADD: Enhanced relationship extraction
+                allObituaries[i].relationships = extractAllRelationships(allObituaries[i].text);
+                
+                // Merge enhanced relationships into facts for display
+                if (allObituaries[i].relationships.parents.length > 0) {
+                    allObituaries[i].facts.parents = allObituaries[i].relationships.parents.join(', ');
+                }
+                if (allObituaries[i].relationships.siblings.length > 0) {
+                    allObituaries[i].facts.siblings = allObituaries[i].relationships.siblings.join(', ');
+                }
+                
                 updateProgress(75 + ((i + 1) / allObituaries.length) * 25, `Extracting: ${i + 1}/${allObituaries.length}`);
             }
 
@@ -1524,6 +1536,170 @@
             return facts;
         }
 
+        // ========== ENHANCED RELATIONSHIP EXTRACTION ==========
+        // These functions provide more detailed family relationship extraction
+
+        function extractAllRelationships(text) {
+            // Comprehensive relationship extraction
+            // Returns: { parents: [], siblings: [], children: [], spouse: [] }
+            
+            const relationships = {
+                parents: [],
+                siblings: [],
+                children: [],
+                spouse: []
+            };
+
+            if (!text || text.length < 20) return relationships;
+
+            const cleanText = text.replace(/\s+/g, ' ').trim();
+
+            // Extract each relationship type
+            relationships.spouse = extractByKeywords(cleanText, [
+                'wife of', 'husband of', 'beloved wife of', 'beloved husband of',
+                'loving wife of', 'loving husband of', 'widow of', 'widower of',
+                'married to', 'spouse of', 'dear wife of', 'dear husband of'
+            ]);
+
+            relationships.parents = extractByKeywords(cleanText, [
+                'daughter of', 'son of', 'child of',
+                'dear daughter of', 'dear son of', 'loving daughter of', 'loving son of',
+                'cherished daughter of', 'cherished son of'
+            ]);
+
+            relationships.siblings = extractByKeywords(cleanText, [
+                'sister of', 'brother of', 'sibling of',
+                'dear sister of', 'dear brother of',
+                'survived by sister', 'survived by brother',
+                'survived by sisters', 'survived by brothers'
+            ]);
+
+            relationships.children = extractByKeywords(cleanText, [
+                'mother of', 'father of', 'parent of',
+                'loving mother of', 'loving father of',
+                'devoted mother of', 'devoted father of',
+                'survived by children', 'survived by son', 'survived by daughter',
+                'survived by sons', 'survived by daughters'
+            ]);
+
+            return relationships;
+        }
+
+        function extractByKeywords(text, keywords) {
+            const names = new Set();
+
+            for (const keyword of keywords) {
+                // Create regex to find keyword + names after it
+                const regex = new RegExp(keyword + '\\s+([^.;!?]+)', 'gi');
+                const matches = text.matchAll(regex);
+
+                for (const match of matches) {
+                    const segment = match[1].trim();
+                    
+                    // Extract all names from this segment
+                    const extractedNames = parseNamesFromText(segment);
+                    extractedNames.forEach(name => names.add(name));
+                }
+            }
+
+            return Array.from(names);
+        }
+
+        function parseNamesFromText(text) {
+            // Parse names from a text segment like:
+            // "John Smith and Mary Jones" → ["John Smith", "Mary Jones"]
+            // "Tom, Dick, and Harry" → ["Tom", "Dick", "Harry"]
+            
+            const names = [];
+            
+            // Stop words that indicate end of name list
+            const stopWords = [
+                'he', 'she', 'they', 'who', 'which', 'that', 'the', 'a', 'an',
+                'survived', 'preceded', 'funeral', 'service', 'memorial',
+                'visitation', 'burial', 'interment', 'was', 'were', 'had',
+                'will', 'would', 'said', 'told', 'many', 'numerous', 'several'
+            ];
+
+            // Split by common delimiters
+            const parts = text.split(/[,;]|\sand\s|\sor\s/i);
+
+            for (let part of parts) {
+                part = part.trim();
+
+                // Stop if we hit a stop word
+                const hasStopWord = stopWords.some(word => 
+                    part.toLowerCase().split(/\s+/).includes(word)
+                );
+                if (hasStopWord) break;
+
+                // Extract name patterns
+                const namePatterns = [
+                    // "Firstname M. Lastname"
+                    /([A-Z][a-z]+\s+[A-Z]\.\s+[A-Z][a-z]+)/,
+                    // "Firstname Lastname"
+                    /([A-Z][a-z]+\s+[A-Z][a-z]+)/,
+                    // "Firstname Middle Lastname"
+                    /([A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+)/
+                ];
+
+                for (const pattern of namePatterns) {
+                    const match = part.match(pattern);
+                    if (match) {
+                        const name = match[1].trim();
+                        const words = name.split(/\s+/);
+                        
+                        // Validate: 2-4 words, reasonable length
+                        if (words.length >= 2 && words.length <= 4 && name.length < 50) {
+                            // Check it's not a place or common phrase
+                            if (!isCommonPhrase(name)) {
+                                names.push(name);
+                                break; // Take first valid pattern per part
+                            }
+                        }
+                    }
+                }
+            }
+
+            return names;
+        }
+
+        function isCommonPhrase(text) {
+            const commonPhrases = [
+                'United States', 'North America', 'South America',
+                'New York', 'Los Angeles', 'San Francisco', // Will be caught, but acceptable
+                'Memorial Day', 'Veterans Day', 'Christmas Day',
+                'Many Years', 'Several Years', 'Funeral Home'
+            ];
+
+            const lowerText = text.toLowerCase();
+            return commonPhrases.some(phrase => 
+                lowerText === phrase.toLowerCase()
+            );
+        }
+
+        // Helper function to display all relationships in the UI
+        function formatRelationships(relationships) {
+            const parts = [];
+
+            if (relationships.spouse && relationships.spouse.length > 0) {
+                parts.push(`Spouse: ${relationships.spouse.join(', ')}`);
+            }
+
+            if (relationships.parents && relationships.parents.length > 0) {
+                parts.push(`Parents: ${relationships.parents.join(', ')}`);
+            }
+
+            if (relationships.siblings && relationships.siblings.length > 0) {
+                parts.push(`Siblings: ${relationships.siblings.join(', ')}`);
+            }
+
+            if (relationships.children && relationships.children.length > 0) {
+                parts.push(`Children: ${relationships.children.join(', ')}`);
+            }
+
+            return parts.length > 0 ? parts.join(' | ') : 'Not mentioned';
+        }
+
         function updateProgress(percent, message) {
             document.getElementById('progressBar').style.width = percent + '%';
             document.getElementById('progressText').textContent = message;
@@ -1573,9 +1749,16 @@
             factsDiv.innerHTML = '';
             
             const labels = {
-                name: 'Name', maiden_name: 'Maiden Name', birth_date: 'Birth Date',
-                death_date: 'Death Date', spouse: 'Spouse', children: 'Children',
-                other_family: 'Other Family', location: 'Location'
+                name: 'Name',
+                maiden_name: 'Maiden Name',
+                birth_date: 'Birth Date',
+                death_date: 'Death Date',
+                spouse: 'Spouse',
+                parents: 'Parents',
+                siblings: 'Siblings',
+                children: 'Children',
+                other_family: 'Other Family',
+                location: 'Location'
             };
 
             Object.entries(labels).forEach(([key, label]) => {

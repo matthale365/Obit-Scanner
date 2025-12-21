@@ -720,6 +720,40 @@
             }
             console.log(`  ${whitePixels} white pixels (${(whitePixels/binary.length*100).toFixed(1)}%)`);
 
+            // ADD VIRTUAL BOUNDARIES: Draw white borders at scan edges
+            console.log('\nStep 4.5: Adding virtual boundaries at scan edges...');
+            const borderWidth = 30; // 30px white border
+            
+            // Top border
+            for (let y = 0; y < borderWidth; y++) {
+                for (let x = 0; x < width; x++) {
+                    binary[y * width + x] = 0; // Black (background)
+                }
+            }
+            
+            // Bottom border
+            for (let y = height - borderWidth; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    binary[y * width + x] = 0;
+                }
+            }
+            
+            // Left border
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < borderWidth; x++) {
+                    binary[y * width + x] = 0;
+                }
+            }
+            
+            // Right border
+            for (let y = 0; y < height; y++) {
+                for (let x = width - borderWidth; x < width; x++) {
+                    binary[y * width + x] = 0;
+                }
+            }
+            
+            console.log(`  Added ${borderWidth}px black borders on all edges`);
+
             // Step 5: Light dilation to ensure blobs are solid
             console.log('\nStep 5: Light dilation to solidify blobs...');
             let morphed = binary.slice();

@@ -1325,26 +1325,39 @@
                 image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
             }
 
-            // Zoom with mouse wheel (works anywhere in container)
+            // Zoom with mouse wheel - using transform-origin for stable zoom
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 
-                // Get mouse position relative to the viewport
-                const mouseX = e.clientX;
-                const mouseY = e.clientY;
+                // Get the image's current bounding box
+                const rect = image.getBoundingClientRect();
                 
-                // Calculate zoom delta
+                // Calculate mouse position relative to the image's top-left corner
+                // We need to account for current scale and translation
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
+                // Convert to percentage of image dimensions for transform-origin
+                const percentX = (mouseX / rect.width) * 100;
+                const percentY = (mouseY / rect.height) * 100;
+                
+                // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
-                const newScale = Math.max(0.5, Math.min(10, scale * delta));
+                const oldScale = scale;
+                scale = Math.max(0.5, Math.min(10, scale * delta));
                 
-                // Calculate new position to zoom toward mouse
-                // The point under the mouse should stay in the same place
-                const scaleFactor = newScale / scale;
+                // Set transform origin to mouse position
+                image.style.transformOrigin = `${percentX}% ${percentY}%`;
                 
-                translateX = mouseX - (mouseX - translateX) * scaleFactor;
-                translateY = mouseY - (mouseY - translateY) * scaleFactor;
+                // Adjust translation to keep the point under mouse stationary
+                // When we change transform-origin, we need to compensate translation
+                const scaleDiff = scale - oldScale;
+                const originOffsetX = (rect.width / 2) - mouseX;
+                const originOffsetY = (rect.height / 2) - mouseY;
                 
-                scale = newScale;
+                translateX -= originOffsetX * scaleDiff / oldScale;
+                translateY -= originOffsetY * scaleDiff / oldScale;
+                
                 updateTransform();
             }, { passive: false });
 
@@ -1486,26 +1499,37 @@
                 image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale}) ${rotation}`;
             }
 
-            // Zoom with mouse wheel (works anywhere)
+            // Zoom with mouse wheel - using transform-origin for stable zoom
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 
-                // Get mouse position relative to the viewport
-                const mouseX = e.clientX;
-                const mouseY = e.clientY;
+                // Get the image's current bounding box
+                const rect = image.getBoundingClientRect();
                 
-                // Calculate zoom delta
+                // Calculate mouse position relative to the image
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
+                // Convert to percentage for transform-origin
+                const percentX = (mouseX / rect.width) * 100;
+                const percentY = (mouseY / rect.height) * 100;
+                
+                // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
-                const newScale = Math.max(0.1, Math.min(20, scale * delta));
+                const oldScale = scale;
+                scale = Math.max(0.1, Math.min(20, scale * delta));
                 
-                // Calculate new position to zoom toward mouse
-                // The point under the mouse should stay in the same place
-                const scaleFactor = newScale / scale;
+                // Set transform origin to mouse position
+                image.style.transformOrigin = `${percentX}% ${percentY}%`;
                 
-                translateX = mouseX - (mouseX - translateX) * scaleFactor;
-                translateY = mouseY - (mouseY - translateY) * scaleFactor;
+                // Adjust translation to compensate for origin change
+                const scaleDiff = scale - oldScale;
+                const originOffsetX = (rect.width / 2) - mouseX;
+                const originOffsetY = (rect.height / 2) - mouseY;
                 
-                scale = newScale;
+                translateX -= originOffsetX * scaleDiff / oldScale;
+                translateY -= originOffsetY * scaleDiff / oldScale;
+                
                 updateTransform();
             }, { passive: false });
 

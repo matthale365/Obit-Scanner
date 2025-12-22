@@ -2564,15 +2564,12 @@
             // Hide upload section
             document.getElementById('uploadSection').classList.add('hidden');
 
-            // Create and show grid
+            // Create and show grid (no buttons on this page)
             const gridHTML = `
                 <div style="max-width: 1400px; margin: 0 auto; padding: 40px 20px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+                    <div style="margin-bottom: 30px;">
                         <h2>📋 Review Obituaries (${allObituaries.length})</h2>
-                        <div style="display: flex; gap: 15px;">
-                            <button class="btn btn-secondary" onclick="markUnsure()">❓ Unsure</button>
-                            <button class="btn btn-success" onclick="markDone()">✓ Done</button>
-                        </div>
+                        <p style="color: var(--text-secondary); margin-top: 10px;">Click any obituary to review</p>
                     </div>
                     <div id="obituaryGrid" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px;">
                         ${allObituaries.map((obit, index) => `
@@ -2600,54 +2597,89 @@
         function viewFullImage(index) {
             const obit = allObituaries[index];
             
-            // Create fullscreen overlay
-            const overlay = document.createElement('div');
-            overlay.style.cssText = `
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background: rgba(0,0,0,0.9);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                z-index: 10000;
-                padding: 40px;
-            `;
-            
-            overlay.innerHTML = `
-                <div style="position: relative; max-width: 90%; max-height: 90%; display: flex; flex-direction: column; align-items: center;">
-                    <button onclick="this.parentElement.parentElement.remove()" style="position: absolute; top: -40px; right: 0; background: white; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 24px; cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,0.3);">
-                        ✕
-                    </button>
-                    <img src="${obit.image}" style="max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);" />
-                    <div style="margin-top: 20px; color: white; font-size: 1.1rem;">
-                        Obituary ${index + 1} of ${allObituaries.length}
+            // Create new page with image and buttons
+            document.body.innerHTML = `
+                <style>
+                    body {
+                        margin: 0;
+                        padding: 0;
+                        background: var(--bg-primary);
+                        display: flex;
+                        flex-direction: column;
+                        min-height: 100vh;
+                    }
+                    .view-header {
+                        padding: 20px 40px;
+                        background: var(--bg-secondary);
+                        border-bottom: 1px solid var(--border);
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    }
+                    .view-content {
+                        flex: 1;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 40px;
+                    }
+                    .obit-image {
+                        max-width: 90%;
+                        max-height: 80vh;
+                        object-fit: contain;
+                        border-radius: 8px;
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                    }
+                </style>
+                
+                <div class="view-header">
+                    <div>
+                        <h2 style="margin: 0;">Obituary ${index + 1} of ${allObituaries.length}</h2>
+                        <button class="btn btn-secondary" onclick="showGrid()" style="margin-top: 10px;">
+                            ← Back to Grid
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 15px;">
+                        <button class="btn btn-secondary" onclick="markUnsure(${index})">
+                            ❓ Unsure
+                        </button>
+                        <button class="btn btn-success" onclick="markDone(${index})">
+                            ✓ Done
+                        </button>
                     </div>
                 </div>
+                
+                <div class="view-content">
+                    <img src="${obit.image}" class="obit-image" alt="Obituary ${index + 1}" />
+                </div>
             `;
-            
-            document.body.appendChild(overlay);
-            
-            // Close on background click
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay) {
-                    overlay.remove();
-                }
-            });
         }
 
-        function markUnsure() {
-            if (confirm('Mark these obituaries as "Unsure" and save for later review?')) {
-                alert('Obituaries marked as unsure. Feature coming soon!');
+        function markUnsure(index) {
+            if (confirm('Mark this obituary as "Unsure" for later review?')) {
+                // Mark as unsure and go to next or back to grid
+                alert('Marked as unsure!');
+                if (index + 1 < allObituaries.length) {
+                    viewFullImage(index + 1); // Next obituary
+                } else {
+                    showGrid(); // Back to grid if last one
+                }
             }
         }
 
-        function markDone() {
-            if (confirm('Mark all obituaries as complete?')) {
-                alert('Great! All ${allObituaries.length} obituaries processed.');
-                location.reload();
+        function markDone(index) {
+            if (confirm('Mark this obituary as complete?')) {
+                alert('Marked as done!');
+                if (index + 1 < allObituaries.length) {
+                    viewFullImage(index + 1); // Next obituary
+                } else {
+                    // All done!
+                    if (confirm(`All ${allObituaries.length} obituaries reviewed! Start over?`)) {
+                        location.reload();
+                    } else {
+                        showGrid();
+                    }
+                }
             }
         }
 

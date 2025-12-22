@@ -791,14 +791,10 @@
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
                 
-                // SIMPLE APPROACH:
-                // 1. Crop with extra padding to ensure we have rotation room
-                // 2. Detect rotation
-                // 3. Rotate the crop
-                // 4. Expand top by 200px and re-crop from original
+                // APPROACH: Detect rotation, expand in the direction that will become "top" after rotation
                 
-                // Initial generous crop to have room for rotation
-                const initialPadding = 250; // Large enough to accommodate 200px + rotation
+                // Step 1: Initial crop with generous padding
+                const initialPadding = 250;
                 const x1 = Math.max(0, box.x - initialPadding);
                 const y1 = Math.max(0, box.y - initialPadding);
                 const w1 = Math.min(width - x1, box.w + 2 * initialPadding);
@@ -809,7 +805,7 @@
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
                 
-                // Detect rotation on this crop
+                // Step 2: Detect rotation
                 let rotationAngle = 0;
                 try {
                     console.log(`  Obit ${i+1}: Detecting rotation...`);
@@ -830,55 +826,63 @@
                     console.log(`    Rotation detection failed, using 0°`);
                 }
                 
-                // Now calculate the FINAL crop box with 200px top expansion
-                // The "top" depends on rotation angle
+                // Step 3: Calculate final crop with top expansion
+                // KEY: After we rotate the crop, which direction becomes "top"?
+                // If we need to rotate 90° CW, the LEFT side becomes top
+                // If we need to rotate 180°, the BOTTOM becomes top
+                // If we need to rotate 270° CW, the RIGHT side becomes top
+                
                 const topExpansion = 200;
                 const sidePadding = 40;
                 
                 let finalX, finalY, finalW, finalH;
                 
                 if (rotationAngle === 0) {
-                    // Normal orientation - expand upward
+                    // No rotation needed - expand UP
                     finalX = Math.max(0, box.x - sidePadding);
-                    finalY = Math.max(0, box.y - topExpansion); // UP
+                    finalY = Math.max(0, box.y - topExpansion);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
+                    console.log(`    Direction: UP (y - ${topExpansion})`);
                     
                 } else if (rotationAngle === 90) {
-                    // Rotated 90° CW - "top" is on the RIGHT side of original
-                    finalX = Math.max(0, box.x - sidePadding);
-                    finalY = Math.max(0, box.y - sidePadding);
-                    finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding); // RIGHT
-                    finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
-                    
-                } else if (rotationAngle === 180) {
-                    // Upside down - "top" is at BOTTOM of original
-                    finalX = Math.max(0, box.x - sidePadding);
-                    finalY = Math.max(0, box.y - sidePadding);
-                    finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
-                    finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding); // DOWN
-                    
-                } else { // 270
-                    // Rotated 90° CCW - "top" is on the LEFT side of original
-                    finalX = Math.max(0, box.x - topExpansion); // LEFT
+                    // Rotate 90° CW - LEFT side becomes top, so expand LEFT
+                    finalX = Math.max(0, box.x - topExpansion);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
                     finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
+                    console.log(`    Direction: LEFT (x - ${topExpansion})`);
+                    
+                } else if (rotationAngle === 180) {
+                    // Rotate 180° - BOTTOM becomes top, so expand DOWN
+                    finalX = Math.max(0, box.x - sidePadding);
+                    finalY = Math.max(0, box.y - sidePadding);
+                    finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
+                    finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
+                    console.log(`    Direction: DOWN (h + ${topExpansion})`);
+                    
+                } else { // 270
+                    // Rotate 270° CW (90° CCW) - RIGHT side becomes top, so expand RIGHT
+                    finalX = Math.max(0, box.x - sidePadding);
+                    finalY = Math.max(0, box.y - sidePadding);
+                    finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
+                    finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
+                    console.log(`    Direction: RIGHT (w + ${topExpansion})`);
                 }
                 
-                // Crop from original with final dimensions
+                // Step 4: Crop from original with calculated box
                 const finalCanvas = document.createElement('canvas');
                 finalCanvas.width = finalW;
                 finalCanvas.height = finalH;
                 finalCanvas.getContext('2d').drawImage(sourceCanvas, finalX, finalY, finalW, finalH, 0, 0, finalW, finalH);
                 
-                // Rotate to correct orientation
+                // Step 5: Rotate to correct orientation
                 let rotatedCanvas = finalCanvas;
                 if (rotationAngle > 0) {
                     rotatedCanvas = rotateCanvas(finalCanvas, rotationAngle);
                 }
                 
-                console.log(`    Final: ${rotatedCanvas.width}x${rotatedCanvas.height}, ${topExpansion}px top expansion`);
+                console.log(`    Final size: ${rotatedCanvas.width}x${rotatedCanvas.height}`);
                 
                 cards.push({
                     canvas: rotatedCanvas,

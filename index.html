@@ -295,6 +295,14 @@
             });
         })();
 
+        function showStatus(message, type = '') {
+            const statusEl = document.getElementById('statusMessage');
+            if (statusEl) {
+                statusEl.textContent = message;
+                statusEl.className = type; // 'info', 'success', 'warning', 'error'
+            }
+        }
+
         async function handleFiles(e) {
             console.log('handleFiles called', e);
             const files = Array.from(e.target.files);

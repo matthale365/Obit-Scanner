@@ -788,17 +788,15 @@
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
                 
-                // EXPANDED PADDING: Capture handwritten dates/notes around obituary
-                // Top often has 2-line stamped dates/names - needs extra space
-                const paddingTop = 200;   // LARGE top offset for multi-line headers
-                const paddingSides = 60;  // Side notes (working well)
-                const paddingBottom = 40; // Standard bottom padding
+                // Standard padding for initial crop
+                // Top padding will be added AFTER rotation
+                const padding = 30; // Moderate padding for initial crop
                 
-                // Calculate crop coordinates with expanded boundaries
-                const sourceX = Math.max(0, box.x - paddingSides);
-                const sourceY = Math.max(0, box.y - paddingTop);
-                const sourceW = Math.min(width - sourceX, box.w + 2 * paddingSides);
-                const sourceH = Math.min(height - sourceY, box.h + paddingTop + paddingBottom);
+                // Calculate crop coordinates
+                const sourceX = Math.max(0, box.x - padding);
+                const sourceY = Math.max(0, box.y - padding);
+                const sourceW = Math.min(width - sourceX, box.w + 2 * padding);
+                const sourceH = Math.min(height - sourceY, box.h + 2 * padding);
 
                 // Create new canvas for this crop
                 const cardCanvas = document.createElement('canvas');
@@ -806,11 +804,10 @@
                 cardCanvas.height = sourceH;
                 const cardCtx = cardCanvas.getContext('2d');
                 
-                // Draw cropped region from ORIGINAL image (includes handwritten notes)
+                // Draw cropped region from ORIGINAL image
                 cardCtx.drawImage(sourceCanvas, sourceX, sourceY, sourceW, sourceH, 0, 0, sourceW, sourceH);
                 
                 console.log(`  Obit ${i+1}: ${sourceW}x${sourceH} at (${sourceX}, ${sourceY})`);
-                console.log(`    Padding: Top=${paddingTop}px, Sides=${paddingSides}px, Bottom=${paddingBottom}px`);
                 
                 cards.push({
                     canvas: cardCanvas,
@@ -1232,7 +1229,34 @@
                 card.canvas = rotateCanvas(card.canvas, best * 90);
                 card.rotated = true;
             }
+            
+            // ADD TOP OFFSET: After rotation, expand top to capture stamped dates/names
+            card.canvas = addTopPadding(card.canvas, 200);
+            
             card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
+        }
+
+        function addTopPadding(canvas, extraTop) {
+            // Add extra space at the top to capture handwritten dates/names
+            // This happens AFTER rotation, so "top" is correctly oriented
+            
+            const newCanvas = document.createElement('canvas');
+            const ctx = newCanvas.getContext('2d');
+            
+            // New dimensions: same width, taller height
+            newCanvas.width = canvas.width;
+            newCanvas.height = canvas.height + extraTop;
+            
+            // Fill with white background
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, newCanvas.width, newCanvas.height);
+            
+            // Draw original image offset down by extraTop pixels
+            ctx.drawImage(canvas, 0, extraTop);
+            
+            console.log(`  Added ${extraTop}px top padding (now ${newCanvas.width}x${newCanvas.height})`);
+            
+            return newCanvas;
         }
 
         function rotateCanvas(canvas, degrees) {

@@ -2607,6 +2607,7 @@
                         display: flex;
                         flex-direction: column;
                         min-height: 100vh;
+                        overflow: hidden;
                     }
                     .view-header {
                         padding: 20px 40px;
@@ -2615,6 +2616,7 @@
                         display: flex;
                         justify-content: space-between;
                         align-items: center;
+                        z-index: 100;
                     }
                     .view-content {
                         flex: 1;
@@ -2622,6 +2624,12 @@
                         align-items: center;
                         justify-content: center;
                         padding: 40px;
+                        overflow: hidden;
+                        position: relative;
+                        cursor: grab;
+                    }
+                    .view-content:active {
+                        cursor: grabbing;
                     }
                     .obit-image {
                         max-width: 90%;
@@ -2629,30 +2637,274 @@
                         object-fit: contain;
                         border-radius: 8px;
                         box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                        user-select: none;
+                        transition: none;
+                    }
+                    .view-full-btn {
+                        position: fixed;
+                        bottom: 30px;
+                        right: 30px;
+                        z-index: 200;
                     }
                 </style>
                 
                 <div class="view-header">
                     <div>
                         <h2 style="margin: 0;">Obituary ${index + 1} of ${allObituaries.length}</h2>
-                        <button class="btn btn-secondary" onclick="showGrid()" style="margin-top: 10px;">
+                        <button class="btn btn-secondary" id="backToGridBtn" style="margin-top: 10px;">
                             ← Back to Grid
                         </button>
                     </div>
                     <div style="display: flex; gap: 15px;">
-                        <button class="btn btn-secondary" onclick="markUnsure(${index})">
+                        <button class="btn btn-secondary" id="unsureBtn">
                             ❓ Unsure
                         </button>
-                        <button class="btn btn-success" onclick="markDone(${index})">
+                        <button class="btn btn-success" id="doneBtn">
                             ✓ Done
                         </button>
                     </div>
                 </div>
                 
-                <div class="view-content">
-                    <img src="${obit.image}" class="obit-image" alt="Obituary ${index + 1}" />
+                <div class="view-content" id="viewContent">
+                    <img src="${obit.image}" class="obit-image" id="obitImage" alt="Obituary ${index + 1}" />
+                </div>
+                
+                <button class="btn btn-primary view-full-btn" id="viewFullScanBtn">
+                    🔍 View Full Scan
+                </button>
+            `;
+
+            // Add event listeners after DOM is created
+            document.getElementById('backToGridBtn').addEventListener('click', () => showGrid());
+            document.getElementById('unsureBtn').addEventListener('click', () => markUnsure(index));
+            document.getElementById('doneBtn').addEventListener('click', () => markDone(index));
+            document.getElementById('viewFullScanBtn').addEventListener('click', () => viewFullScan(index));
+
+            // Initialize zoom and pan for obituary image
+            initZoomPan('viewContent', 'obitImage');
+        }
+
+        function initZoomPan(containerId, imageId) {
+            const container = document.getElementById(containerId);
+            const image = document.getElementById(imageId);
+            
+            let scale = 1;
+            let translateX = 0;
+            let translateY = 0;
+            let isDragging = false;
+            let dragStartX = 0;
+            let dragStartY = 0;
+            let lastTranslateX = 0;
+            let lastTranslateY = 0;
+
+            function updateTransform() {
+                image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+            }
+
+            // Zoom with mouse wheel (works anywhere in container)
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                
+                const rect = image.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.5, Math.min(10, scale * delta));
+                
+                // Zoom towards mouse position
+                const scaleChange = newScale / scale;
+                translateX = e.clientX - (e.clientX - translateX) * scaleChange;
+                translateY = e.clientY - (e.clientY - translateY) * scaleChange;
+                
+                scale = newScale;
+                updateTransform();
+            }, { passive: false });
+
+            // Pan with click and drag (only on image)
+            image.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                lastTranslateX = translateX;
+                lastTranslateY = translateY;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                
+                const dx = e.clientX - dragStartX;
+                const dy = e.clientY - dragStartY;
+                
+                translateX = lastTranslateX + dx;
+                translateY = lastTranslateY + dy;
+                
+                updateTransform();
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+        }
+
+        function viewFullScan(index) {
+            const obit = allObituaries[index];
+            const page = scannedPages.find(p => p.splits.some(s => s.sourcePageIndex === obit.sourcePageIndex));
+            
+            if (!page) {
+                alert('Original scan not found');
+                return;
+            }
+
+            // Create popup overlay
+            const overlay = document.createElement('div');
+            overlay.id = 'fullScanOverlay';
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.95);
+                z-index: 10000;
+                display: flex;
+                flex-direction: column;
+            `;
+
+            overlay.innerHTML = `
+                <style>
+                    .scan-header {
+                        padding: 20px;
+                        background: rgba(0,0,0,0.8);
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        color: white;
+                    }
+                    .scan-content {
+                        flex: 1;
+                        overflow: hidden;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        cursor: grab;
+                    }
+                    .scan-content:active {
+                        cursor: grabbing;
+                    }
+                    .scan-image {
+                        max-width: 95%;
+                        max-height: 90%;
+                        object-fit: contain;
+                        user-select: none;
+                        transition: none;
+                    }
+                </style>
+                
+                <div class="scan-header">
+                    <h3 style="margin: 0;">Full Scan: ${page.filename}</h3>
+                    <div style="display: flex; gap: 15px;">
+                        <button class="btn btn-secondary" id="rotateScanBtn">
+                            🔄 Rotate 90°
+                        </button>
+                        <button class="btn btn-secondary" id="closeScanBtn">
+                            ✕ Close
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="scan-content" id="scanContent">
+                    <img src="${page.originalImage}" class="scan-image" id="scanImage" alt="Full Scan" />
                 </div>
             `;
+
+            document.body.appendChild(overlay);
+
+            // Event listeners
+            document.getElementById('closeScanBtn').addEventListener('click', () => {
+                overlay.remove();
+            });
+
+            let rotation = 0;
+            document.getElementById('rotateScanBtn').addEventListener('click', () => {
+                rotation = (rotation + 90) % 360;
+                const scanImage = document.getElementById('scanImage');
+                const currentTransform = scanImage.style.transform || '';
+                const baseTransform = currentTransform.replace(/rotate\([^)]+\)/, '').trim();
+                scanImage.style.transform = `${baseTransform} rotate(${rotation}deg)`;
+            });
+
+            // Initialize zoom and pan for full scan
+            initZoomPanForScan('scanContent', 'scanImage');
+        }
+
+        function initZoomPanForScan(containerId, imageId) {
+            const container = document.getElementById(containerId);
+            const image = document.getElementById(imageId);
+            
+            let scale = 1;
+            let translateX = 0;
+            let translateY = 0;
+            let isDragging = false;
+            let dragStartX = 0;
+            let dragStartY = 0;
+            let lastTranslateX = 0;
+            let lastTranslateY = 0;
+
+            function updateTransform() {
+                const currentTransform = image.style.transform || '';
+                const rotateMatch = currentTransform.match(/rotate\([^)]+\)/);
+                const rotation = rotateMatch ? rotateMatch[0] : '';
+                image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale}) ${rotation}`;
+            }
+
+            // Zoom with mouse wheel (works anywhere)
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                
+                const rect = image.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+                
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.1, Math.min(20, scale * delta));
+                
+                // Zoom towards mouse position
+                const scaleChange = newScale / scale;
+                translateX = e.clientX - (e.clientX - translateX) * scaleChange;
+                translateY = e.clientY - (e.clientY - translateY) * scaleChange;
+                
+                scale = newScale;
+                updateTransform();
+            }, { passive: false });
+
+            // Pan with click and drag (only on image, no bounds)
+            image.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                lastTranslateX = translateX;
+                lastTranslateY = translateY;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                
+                const dx = e.clientX - dragStartX;
+                const dy = e.clientY - dragStartY;
+                
+                // No bounds - allow infinite panning
+                translateX = lastTranslateX + dx;
+                translateY = lastTranslateY + dy;
+                
+                updateTransform();
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
         }
 
         function markUnsure(index) {

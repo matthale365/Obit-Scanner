@@ -1329,17 +1329,20 @@
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 
-                const rect = image.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
+                // Get mouse position relative to the viewport
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
                 
+                // Calculate zoom delta
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.5, Math.min(10, scale * delta));
                 
-                // Zoom towards mouse position
-                const scaleChange = newScale / scale;
-                translateX = e.clientX - (e.clientX - translateX) * scaleChange;
-                translateY = e.clientY - (e.clientY - translateY) * scaleChange;
+                // Calculate new position to zoom toward mouse
+                // The point under the mouse should stay in the same place
+                const scaleFactor = newScale / scale;
+                
+                translateX = mouseX - (mouseX - translateX) * scaleFactor;
+                translateY = mouseY - (mouseY - translateY) * scaleFactor;
                 
                 scale = newScale;
                 updateTransform();
@@ -1487,17 +1490,20 @@
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 
-                const rect = image.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
+                // Get mouse position relative to the viewport
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
                 
+                // Calculate zoom delta
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.1, Math.min(20, scale * delta));
                 
-                // Zoom towards mouse position
-                const scaleChange = newScale / scale;
-                translateX = e.clientX - (e.clientX - translateX) * scaleChange;
-                translateY = e.clientY - (e.clientY - translateY) * scaleChange;
+                // Calculate new position to zoom toward mouse
+                // The point under the mouse should stay in the same place
+                const scaleFactor = newScale / scale;
+                
+                translateX = mouseX - (mouseX - translateX) * scaleFactor;
+                translateY = mouseY - (mouseY - translateY) * scaleFactor;
                 
                 scale = newScale;
                 updateTransform();

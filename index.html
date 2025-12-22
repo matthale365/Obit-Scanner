@@ -567,14 +567,16 @@
 
             showStatus(`✓ ${files.length} scan(s) loaded. Detecting obituaries...`, 'info');
 
-            // STEP 2: Process all splits in batch
+            // STEP 2: Process all splits in batch (now includes rotation)
+            // Initialize Tesseract once before processing
+            if (!tesseractWorker) {
+                showStatus('Initializing OCR engine...', 'info');
+                tesseractWorker = await Tesseract.createWorker('eng');
+            }
+            
             for (const scan of pendingScans) {
                 const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
-                
-                // Auto-rotate each split
-                for (let split of splits) {
-                    await autoRotate(split);
-                }
+                // Note: Rotation is now handled inside findCards
 
                 // Store page data
                 scannedPages.push({
@@ -788,31 +790,104 @@
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
                 
-                // Standard padding for initial crop
-                // Top padding will be added AFTER rotation
-                const padding = 30; // Moderate padding for initial crop
+                // First, create a small preview to detect rotation
+                const previewSize = 300;
+                const previewCanvas = document.createElement('canvas');
+                previewCanvas.width = Math.min(previewSize, box.w);
+                previewCanvas.height = Math.min(previewSize, box.h);
+                const pctx = previewCanvas.getContext('2d');
+                pctx.drawImage(sourceCanvas, 
+                    box.x + (box.w - previewCanvas.width) / 2, 
+                    box.y + (box.h - previewCanvas.height) / 2, 
+                    previewCanvas.width, previewCanvas.height, 
+                    0, 0, previewCanvas.width, previewCanvas.height);
                 
-                // Calculate crop coordinates
-                const sourceX = Math.max(0, box.x - padding);
-                const sourceY = Math.max(0, box.y - padding);
-                const sourceW = Math.min(width - sourceX, box.w + 2 * padding);
-                const sourceH = Math.min(height - sourceY, box.h + 2 * padding);
+                // Quick rotation detection
+                let rotationAngle = 0;
+                try {
+                    const result = await tesseractWorker.recognize(previewCanvas);
+                    let bestConf = result.data.confidence;
+                    rotationAngle = 0;
+                    
+                    // Try 90, 180, 270
+                    for (let angle of [90, 180, 270]) {
+                        const rotated = rotateCanvas(previewCanvas, angle);
+                        const testResult = await tesseractWorker.recognize(rotated);
+                        if (testResult.data.confidence > bestConf) {
+                            bestConf = testResult.data.confidence;
+                            rotationAngle = angle;
+                        }
+                    }
+                    console.log(`  Detected rotation: ${rotationAngle}°`);
+                } catch (err) {
+                    console.log('  Rotation detection failed, using 0°');
+                }
+                
+                // Calculate expanded box based on rotation
+                // We want to add 200px in the "up" direction
+                const topExpansion = 200;
+                const sideExpansion = 30;
+                
+                let expandedBox;
+                if (rotationAngle === 0) {
+                    // Top is actually top - expand upward
+                    expandedBox = {
+                        x: box.x - sideExpansion,
+                        y: box.y - topExpansion,
+                        w: box.w + 2 * sideExpansion,
+                        h: box.h + topExpansion + sideExpansion
+                    };
+                } else if (rotationAngle === 90) {
+                    // Top is on the right - expand right
+                    expandedBox = {
+                        x: box.x - sideExpansion,
+                        y: box.y - sideExpansion,
+                        w: box.w + topExpansion + sideExpansion,
+                        h: box.h + 2 * sideExpansion
+                    };
+                } else if (rotationAngle === 180) {
+                    // Top is at bottom - expand downward
+                    expandedBox = {
+                        x: box.x - sideExpansion,
+                        y: box.y - sideExpansion,
+                        w: box.w + 2 * sideExpansion,
+                        h: box.h + topExpansion + sideExpansion
+                    };
+                } else { // 270
+                    // Top is on the left - expand left
+                    expandedBox = {
+                        x: box.x - topExpansion,
+                        y: box.y - sideExpansion,
+                        w: box.w + topExpansion + sideExpansion,
+                        h: box.h + 2 * sideExpansion
+                    };
+                }
+                
+                // Clamp to image bounds
+                const sourceX = Math.max(0, expandedBox.x);
+                const sourceY = Math.max(0, expandedBox.y);
+                const sourceW = Math.min(width - sourceX, expandedBox.w);
+                const sourceH = Math.min(height - sourceY, expandedBox.h);
 
-                // Create new canvas for this crop
+                // Crop with expanded box
                 const cardCanvas = document.createElement('canvas');
                 cardCanvas.width = sourceW;
                 cardCanvas.height = sourceH;
                 const cardCtx = cardCanvas.getContext('2d');
-                
-                // Draw cropped region from ORIGINAL image
                 cardCtx.drawImage(sourceCanvas, sourceX, sourceY, sourceW, sourceH, 0, 0, sourceW, sourceH);
                 
-                console.log(`  Obit ${i+1}: ${sourceW}x${sourceH} at (${sourceX}, ${sourceY})`);
+                // Now rotate the cropped image
+                let finalCanvas = cardCanvas;
+                if (rotationAngle > 0) {
+                    finalCanvas = rotateCanvas(cardCanvas, rotationAngle);
+                }
+                
+                console.log(`  Obit ${i+1}: ${sourceW}x${sourceH} at (${sourceX}, ${sourceY}), rotated ${rotationAngle}°`);
                 
                 cards.push({
-                    canvas: cardCanvas,
-                    dataUrl: cardCanvas.toDataURL('image/jpeg', 0.95),
-                    rotated: false,
+                    canvas: finalCanvas,
+                    dataUrl: finalCanvas.toDataURL('image/jpeg', 0.95),
+                    rotated: rotationAngle > 0,
                     sourcePageIndex: pageIndex
                 });
             }
@@ -1229,34 +1304,7 @@
                 card.canvas = rotateCanvas(card.canvas, best * 90);
                 card.rotated = true;
             }
-            
-            // ADD TOP OFFSET: After rotation, expand top to capture stamped dates/names
-            card.canvas = addTopPadding(card.canvas, 200);
-            
             card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
-        }
-
-        function addTopPadding(canvas, extraTop) {
-            // Add extra space at the top to capture handwritten dates/names
-            // This happens AFTER rotation, so "top" is correctly oriented
-            
-            const newCanvas = document.createElement('canvas');
-            const ctx = newCanvas.getContext('2d');
-            
-            // New dimensions: same width, taller height
-            newCanvas.width = canvas.width;
-            newCanvas.height = canvas.height + extraTop;
-            
-            // Fill with white background
-            ctx.fillStyle = '#FFFFFF';
-            ctx.fillRect(0, 0, newCanvas.width, newCanvas.height);
-            
-            // Draw original image offset down by extraTop pixels
-            ctx.drawImage(canvas, 0, extraTop);
-            
-            console.log(`  Added ${extraTop}px top padding (now ${newCanvas.width}x${newCanvas.height})`);
-            
-            return newCanvas;
         }
 
         function rotateCanvas(canvas, degrees) {

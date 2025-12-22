@@ -785,108 +785,104 @@
             console.log(`\n✓ Found ${boxes.length} obituaries`);
 
             // Step 8: Crop original image using bounding boxes
-            console.log('\nStep 8: Cropping original image...');
+            console.log('\nStep 8: Cropping original image with rotation-aware expansion...');
             const cards = [];
+            
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
                 
-                // First, create a small preview to detect rotation
-                const previewSize = 300;
-                const previewCanvas = document.createElement('canvas');
-                previewCanvas.width = Math.min(previewSize, box.w);
-                previewCanvas.height = Math.min(previewSize, box.h);
-                const pctx = previewCanvas.getContext('2d');
-                pctx.drawImage(sourceCanvas, 
-                    box.x + (box.w - previewCanvas.width) / 2, 
-                    box.y + (box.h - previewCanvas.height) / 2, 
-                    previewCanvas.width, previewCanvas.height, 
-                    0, 0, previewCanvas.width, previewCanvas.height);
+                // SIMPLE APPROACH:
+                // 1. Crop with extra padding to ensure we have rotation room
+                // 2. Detect rotation
+                // 3. Rotate the crop
+                // 4. Expand top by 200px and re-crop from original
                 
-                // Quick rotation detection
+                // Initial generous crop to have room for rotation
+                const initialPadding = 250; // Large enough to accommodate 200px + rotation
+                const x1 = Math.max(0, box.x - initialPadding);
+                const y1 = Math.max(0, box.y - initialPadding);
+                const w1 = Math.min(width - x1, box.w + 2 * initialPadding);
+                const h1 = Math.min(height - y1, box.h + 2 * initialPadding);
+                
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = w1;
+                tempCanvas.height = h1;
+                tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
+                
+                // Detect rotation on this crop
                 let rotationAngle = 0;
                 try {
-                    const result = await tesseractWorker.recognize(previewCanvas);
-                    let bestConf = result.data.confidence;
+                    console.log(`  Obit ${i+1}: Detecting rotation...`);
+                    const result0 = await tesseractWorker.recognize(tempCanvas);
+                    let bestConf = result0.data.confidence;
                     rotationAngle = 0;
                     
-                    // Try 90, 180, 270
                     for (let angle of [90, 180, 270]) {
-                        const rotated = rotateCanvas(previewCanvas, angle);
-                        const testResult = await tesseractWorker.recognize(rotated);
-                        if (testResult.data.confidence > bestConf) {
-                            bestConf = testResult.data.confidence;
+                        const rotated = rotateCanvas(tempCanvas, angle);
+                        const result = await tesseractWorker.recognize(rotated);
+                        if (result.data.confidence > bestConf) {
+                            bestConf = result.data.confidence;
                             rotationAngle = angle;
                         }
                     }
-                    console.log(`  Detected rotation: ${rotationAngle}°`);
+                    console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
                 } catch (err) {
-                    console.log('  Rotation detection failed, using 0°');
+                    console.log(`    Rotation detection failed, using 0°`);
                 }
                 
-                // Calculate expanded box based on rotation
-                // We want to add 200px in the "up" direction
+                // Now calculate the FINAL crop box with 200px top expansion
+                // The "top" depends on rotation angle
                 const topExpansion = 200;
-                const sideExpansion = 30;
+                const sidePadding = 40;
                 
-                let expandedBox;
+                let finalX, finalY, finalW, finalH;
+                
                 if (rotationAngle === 0) {
-                    // Top is actually top - expand upward
-                    expandedBox = {
-                        x: box.x - sideExpansion,
-                        y: box.y - topExpansion,
-                        w: box.w + 2 * sideExpansion,
-                        h: box.h + topExpansion + sideExpansion
-                    };
+                    // Normal orientation - expand upward
+                    finalX = Math.max(0, box.x - sidePadding);
+                    finalY = Math.max(0, box.y - topExpansion); // UP
+                    finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
+                    finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
+                    
                 } else if (rotationAngle === 90) {
-                    // Top is on the right - expand right
-                    expandedBox = {
-                        x: box.x - sideExpansion,
-                        y: box.y - sideExpansion,
-                        w: box.w + topExpansion + sideExpansion,
-                        h: box.h + 2 * sideExpansion
-                    };
+                    // Rotated 90° CW - "top" is on the RIGHT side of original
+                    finalX = Math.max(0, box.x - sidePadding);
+                    finalY = Math.max(0, box.y - sidePadding);
+                    finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding); // RIGHT
+                    finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
+                    
                 } else if (rotationAngle === 180) {
-                    // Top is at bottom - expand downward
-                    expandedBox = {
-                        x: box.x - sideExpansion,
-                        y: box.y - sideExpansion,
-                        w: box.w + 2 * sideExpansion,
-                        h: box.h + topExpansion + sideExpansion
-                    };
+                    // Upside down - "top" is at BOTTOM of original
+                    finalX = Math.max(0, box.x - sidePadding);
+                    finalY = Math.max(0, box.y - sidePadding);
+                    finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
+                    finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding); // DOWN
+                    
                 } else { // 270
-                    // Top is on the left - expand left
-                    expandedBox = {
-                        x: box.x - topExpansion,
-                        y: box.y - sideExpansion,
-                        w: box.w + topExpansion + sideExpansion,
-                        h: box.h + 2 * sideExpansion
-                    };
+                    // Rotated 90° CCW - "top" is on the LEFT side of original
+                    finalX = Math.max(0, box.x - topExpansion); // LEFT
+                    finalY = Math.max(0, box.y - sidePadding);
+                    finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
+                    finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
                 }
                 
-                // Clamp to image bounds
-                const sourceX = Math.max(0, expandedBox.x);
-                const sourceY = Math.max(0, expandedBox.y);
-                const sourceW = Math.min(width - sourceX, expandedBox.w);
-                const sourceH = Math.min(height - sourceY, expandedBox.h);
-
-                // Crop with expanded box
-                const cardCanvas = document.createElement('canvas');
-                cardCanvas.width = sourceW;
-                cardCanvas.height = sourceH;
-                const cardCtx = cardCanvas.getContext('2d');
-                cardCtx.drawImage(sourceCanvas, sourceX, sourceY, sourceW, sourceH, 0, 0, sourceW, sourceH);
+                // Crop from original with final dimensions
+                const finalCanvas = document.createElement('canvas');
+                finalCanvas.width = finalW;
+                finalCanvas.height = finalH;
+                finalCanvas.getContext('2d').drawImage(sourceCanvas, finalX, finalY, finalW, finalH, 0, 0, finalW, finalH);
                 
-                // Now rotate the cropped image
-                let finalCanvas = cardCanvas;
+                // Rotate to correct orientation
+                let rotatedCanvas = finalCanvas;
                 if (rotationAngle > 0) {
-                    finalCanvas = rotateCanvas(cardCanvas, rotationAngle);
+                    rotatedCanvas = rotateCanvas(finalCanvas, rotationAngle);
                 }
                 
-                console.log(`  Obit ${i+1}: ${sourceW}x${sourceH} at (${sourceX}, ${sourceY}), rotated ${rotationAngle}°`);
+                console.log(`    Final: ${rotatedCanvas.width}x${rotatedCanvas.height}, ${topExpansion}px top expansion`);
                 
                 cards.push({
-                    canvas: finalCanvas,
-                    dataUrl: finalCanvas.toDataURL('image/jpeg', 0.95),
+                    canvas: rotatedCanvas,
+                    dataUrl: rotatedCanvas.toDataURL('image/jpeg', 0.95),
                     rotated: rotationAngle > 0,
                     sourcePageIndex: pageIndex
                 });

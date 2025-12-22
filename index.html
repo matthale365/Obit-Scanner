@@ -270,12 +270,14 @@
         let scannedPages = [];
         let allObituaries = [];
         let tesseractWorker = null;
-        let fsCurrentMatches = [];
 
         // Initialize
         (function() {
+            console.log('Initializing...');
             const fileInput = document.getElementById('fileInput');
             const dropZone = document.getElementById('dropZone');
+            console.log('fileInput:', fileInput);
+            console.log('dropZone:', dropZone);
 
             fileInput.addEventListener('change', handleFiles);
             dropZone.addEventListener('dragover', (e) => {
@@ -294,7 +296,9 @@
         })();
 
         async function handleFiles(e) {
+            console.log('handleFiles called', e);
             const files = Array.from(e.target.files);
+            console.log('Files:', files);
             if (files.length === 0) return;
 
             showStatus(`📄 Loading ${files.length} scan(s)...`, 'info');

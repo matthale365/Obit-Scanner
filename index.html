@@ -787,13 +787,18 @@
             const cards = [];
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
-                const padding = 20;
                 
-                // Crop coordinates
-                const sourceX = Math.max(0, box.x - padding);
-                const sourceY = Math.max(0, box.y - padding);
-                const sourceW = Math.min(width - sourceX, box.w + 2 * padding);
-                const sourceH = Math.min(height - sourceY, box.h + 2 * padding);
+                // EXPANDED PADDING: Capture handwritten dates/notes around obituary
+                // Top/sides often have stamped dates, names, newspaper info
+                const paddingTop = 80;    // Extra space for dates above
+                const paddingSides = 60;  // Extra space for side notes
+                const paddingBottom = 40; // Standard bottom padding
+                
+                // Calculate crop coordinates with expanded boundaries
+                const sourceX = Math.max(0, box.x - paddingSides);
+                const sourceY = Math.max(0, box.y - paddingTop);
+                const sourceW = Math.min(width - sourceX, box.w + 2 * paddingSides);
+                const sourceH = Math.min(height - sourceY, box.h + paddingTop + paddingBottom);
 
                 // Create new canvas for this crop
                 const cardCanvas = document.createElement('canvas');
@@ -801,10 +806,11 @@
                 cardCanvas.height = sourceH;
                 const cardCtx = cardCanvas.getContext('2d');
                 
-                // Draw cropped region from ORIGINAL image
+                // Draw cropped region from ORIGINAL image (includes handwritten notes)
                 cardCtx.drawImage(sourceCanvas, sourceX, sourceY, sourceW, sourceH, 0, 0, sourceW, sourceH);
                 
                 console.log(`  Obit ${i+1}: ${sourceW}x${sourceH} at (${sourceX}, ${sourceY})`);
+                console.log(`    Padding: Top=${paddingTop}px, Sides=${paddingSides}px, Bottom=${paddingBottom}px`);
                 
                 cards.push({
                     canvas: cardCanvas,
@@ -1289,6 +1295,15 @@
                     allObituaries[i].facts.siblings = allObituaries[i].relationships.siblings.join(', ');
                 }
                 
+                // ADD: Extract stamped/handwritten metadata from margins
+                allObituaries[i].metadata = extractMetadata(allObituaries[i].text);
+                if (allObituaries[i].metadata.stampedDate) {
+                    allObituaries[i].facts.stamped_date = allObituaries[i].metadata.stampedDate;
+                }
+                if (allObituaries[i].metadata.newspaper) {
+                    allObituaries[i].facts.newspaper = allObituaries[i].metadata.newspaper;
+                }
+                
                 updateProgress(75 + ((i + 1) / allObituaries.length) * 25, `Extracting: ${i + 1}/${allObituaries.length}`);
             }
 
@@ -1700,6 +1715,66 @@
             return parts.length > 0 ? parts.join(' | ') : 'Not mentioned';
         }
 
+        function extractMetadata(text) {
+            // Extract stamped/handwritten metadata typically found in margins
+            // Returns: { stampedDate: string, newspaper: string, notes: string }
+            
+            const metadata = {
+                stampedDate: null,
+                newspaper: null,
+                notes: null
+            };
+
+            if (!text || text.length < 10) return metadata;
+
+            const cleanText = text.replace(/\s+/g, ' ').trim();
+
+            // STAMPED DATE PATTERNS
+            // Common formats: "SEP 13 1988", "MAR 25 1993", "MAY 1 1992"
+            const stampedDatePatterns = [
+                // "SEP 13 1988" (all caps, no commas)
+                /\b([A-Z]{3})\s+(\d{1,2})\s+(\d{4})\b/,
+                // "Sep 13 1988"
+                /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{4})\b/,
+                // "9/13/1988" or "09-13-1988"
+                /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\b/
+            ];
+
+            for (const pattern of stampedDatePatterns) {
+                const match = cleanText.match(pattern);
+                if (match) {
+                    metadata.stampedDate = match[0];
+                    console.log('  Found stamped date:', metadata.stampedDate);
+                    break;
+                }
+            }
+
+            // NEWSPAPER NAME PATTERNS
+            // Common: "Union", "Tribune", "Chronicle", "Times", "Register"
+            const newspaperPatterns = [
+                // Standalone newspaper words (often stamped)
+                /\b(Union|Tribune|Chronicle|Times|Herald|Register|Gazette|News|Post|Journal|Democrat|Republican|Press|Star|Sun|Telegram|Bulletin)\b/i,
+                // With "The" prefix
+                /\bThe\s+([\w\s]+?)\s+(?:Union|Tribune|Chronicle|Times|Herald|Register|Gazette|News|Post)\b/i
+            ];
+
+            for (const pattern of newspaperPatterns) {
+                const match = cleanText.match(pattern);
+                if (match) {
+                    metadata.newspaper = match[0];
+                    console.log('  Found newspaper:', metadata.newspaper);
+                    break;
+                }
+            }
+
+            // HANDWRITTEN NOTES
+            // Look for isolated short text in margins (often names or references)
+            // This is harder to detect reliably, so we'll skip for now
+            // Could check for very short lines (5-20 chars) that appear isolated
+
+            return metadata;
+        }
+
         function updateProgress(percent, message) {
             document.getElementById('progressBar').style.width = percent + '%';
             document.getElementById('progressText').textContent = message;
@@ -1753,6 +1828,8 @@
                 maiden_name: 'Maiden Name',
                 birth_date: 'Birth Date',
                 death_date: 'Death Date',
+                stamped_date: 'Stamped Date',
+                newspaper: 'Newspaper',
                 spouse: 'Spouse',
                 parents: 'Parents',
                 siblings: 'Siblings',

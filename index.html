@@ -789,9 +789,9 @@
                 const box = boxes[i];
                 
                 // EXPANDED PADDING: Capture handwritten dates/notes around obituary
-                // Top/sides often have stamped dates, names, newspaper info
-                const paddingTop = 80;    // Extra space for dates above
-                const paddingSides = 60;  // Extra space for side notes
+                // Top often has 2-line stamped dates/names - needs extra space
+                const paddingTop = 200;   // LARGE top offset for multi-line headers
+                const paddingSides = 60;  // Side notes (working well)
                 const paddingBottom = 40; // Standard bottom padding
                 
                 // Calculate crop coordinates with expanded boundaries

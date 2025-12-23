@@ -217,6 +217,42 @@
             background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
             border-radius: 12px; transition: width 0.3s ease;
         }
+
+        /* Grid view styles */
+        .grid-item {
+            background: var(--bg-medium);
+            cursor: pointer;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+            position: relative;
+            aspect-ratio: 1; /* Make it square */
+        }
+        
+        .grid-item:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+        }
+        
+        .grid-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Crop to fill square */
+            display: block;
+        }
+        
+        .grid-item-label {
+            padding: 10px;
+            background: var(--bg-secondary);
+            text-align: center;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+        }
     </style>
 </head>
 <body>
@@ -270,6 +306,8 @@
         let scannedPages = [];
         let allObituaries = [];
         let tesseractWorker = null;
+        let processingCount = 0;
+        let totalToProcess = 0;
 
         // Initialize
         (function() {
@@ -279,11 +317,27 @@
             console.log('fileInput:', fileInput);
             console.log('dropZone:', dropZone);
 
-            // Check for saved obituaries
+            // Check for saved obituaries and scanned pages
             const saved = loadState();
-            if (saved && saved.length > 0) {
-                showStatus(`📋 ${saved.length} obituaries from previous session. Upload more to add them, or click "Clear All" to start fresh.`, 'info');
-                document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+            if (saved) {
+                if (saved.obituaries && saved.obituaries.length > 0) {
+                    allObituaries = saved.obituaries;
+                    showStatus(`📋 ${saved.obituaries.length} obituaries from previous session. Upload more to add them, or click "Clear All" to start fresh.`, 'info');
+                    document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+                }
+                
+                // Restore scanned pages
+                if (saved.scannedPages && saved.scannedPages.length > 0) {
+                    scannedPages = saved.scannedPages;
+                    // Redisplay all scans
+                    scannedPages.forEach((page, index) => {
+                        const rowId = `scan-row-${index}`;
+                        addScanRow(rowId, page.originalImage, page.filename);
+                        displaySplits(rowId, page.splits);
+                    });
+                    document.getElementById('verifyControls').classList.remove('hidden');
+                    document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+                }
             }
 
             fileInput.addEventListener('change', handleFiles);
@@ -306,7 +360,7 @@
             const statusEl = document.getElementById('statusMessage');
             if (statusEl) {
                 statusEl.textContent = message;
-                statusEl.className = type; // 'info', 'success', 'warning', 'error'
+                statusEl.className = `status-message ${type}`;
             }
         }
 
@@ -317,6 +371,10 @@
             if (files.length === 0) return;
 
             showStatus(`📄 Loading ${files.length} scan(s)...`, 'info');
+
+            // Initialize processing count
+            processingCount = 0;
+            totalToProcess = files.length;
 
             // STEP 1: Instantly show all scans first
             const pendingScans = [];
@@ -346,11 +404,11 @@
             // STEP 2: Process all splits in batch (now includes rotation)
             // Initialize Tesseract once before processing
             if (!tesseractWorker) {
-                showStatus('Processing scans...', 'info');
+                showStatus('Initializing text recognition...', 'info');
                 tesseractWorker = await Tesseract.createWorker('eng');
             }
 
-                       // NEW: Parallel processing of all loaded scans
+            // NEW: Parallel processing of all loaded scans
             const processingPromises = pendingScans.map(async (scan) => {
                 // This now runs simultaneously for every image uploaded
                 const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
@@ -363,6 +421,10 @@
             
                 // Each row updates its UI as soon as it is personally finished
                 displaySplits(scan.rowId, splits);
+                
+                // Update progress
+                processingCount++;
+                updateProgress();
             });
             
             // Wait for the entire batch to finish before showing the final success message
@@ -371,6 +433,17 @@
             showStatus(`✓ All scans processed. Review the splits below.`, 'success');
             document.getElementById('verifyControls').classList.remove('hidden');
             document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+            
+            // Save state after processing
+            saveState();
+            
+            // Reset file input
+            document.getElementById('fileInput').value = '';
+        }
+
+        function updateProgress() {
+            const percentage = (processingCount / totalToProcess) * 100;
+            showStatus(`Processing... ${processingCount}/${totalToProcess} scans complete`, 'info');
         }
 
         async function loadImageFile(file) {
@@ -446,15 +519,68 @@
                 card.className = 'split-card';
                 card.innerHTML = `
                     <button class="delete-split-btn" onclick="deleteSplit('${rowId}', ${index})" title="Delete this obituary">×</button>
-                    <img src="${split.dataUrl}" alt="Obit ${index + 1}" onclick="viewFullScan('${split.dataUrl}')" style="cursor: pointer;" title="Click to enlarge" />
+                    <img src="${split.dataUrl}" alt="Obit ${index + 1}" onclick="viewFullScanImage('${split.dataUrl}')" style="cursor: pointer;" title="Click to enlarge" />
                     <div class="split-card-label">Obituary ${index + 1}</div>
                 `;
                 splitsContainer.appendChild(card);
             });
 
-            const status = document.getElementById(rowId).querySelector('.scan-status');
-            status.textContent = `✓ Found ${splits.length} obituar${splits.length === 1 ? 'y' : 'ies'}`;
-            status.style.color = 'var(--accent-green)';
+            const row = document.getElementById(rowId);
+            if (row) {
+                const status = row.querySelector('.scan-status');
+                status.textContent = `✓ Found ${splits.length} obituar${splits.length === 1 ? 'y' : 'ies'}`;
+                status.style.color = 'var(--accent-green)';
+            }
+        }
+
+        function deleteScan(rowId) {
+            if (confirm('Delete this scan and all its obituaries?')) {
+                // Find the page index from rowId
+                const pageIndex = parseInt(rowId.replace('scan-row-', ''));
+                
+                // Remove from scannedPages
+                scannedPages = scannedPages.filter((_, idx) => idx !== pageIndex);
+                
+                // Remove the row from DOM
+                const row = document.getElementById(rowId);
+                if (row) row.remove();
+                
+                // Re-index remaining rows
+                const container = document.getElementById('scanRowsContainer');
+                const rows = container.querySelectorAll('.scan-row');
+                rows.forEach((row, idx) => {
+                    row.id = `scan-row-${idx}`;
+                });
+                
+                // Update UI
+                if (scannedPages.length === 0) {
+                    document.getElementById('verifyControls').classList.add('hidden');
+                    document.getElementById('clearAllTopBtn').style.display = 'none';
+                    showStatus('All scans cleared. Upload new scans to begin.', 'info');
+                } else {
+                    showStatus(`${scannedPages.length} scan(s) remaining.`, 'success');
+                }
+                
+                // Save state
+                saveState();
+            }
+        }
+
+        function deleteSplit(rowId, splitIndex) {
+            if (confirm('Delete this obituary?')) {
+                const pageIndex = parseInt(rowId.replace('scan-row-', ''));
+                
+                // Remove split from the page
+                if (scannedPages[pageIndex]) {
+                    scannedPages[pageIndex].splits.splice(splitIndex, 1);
+                    
+                    // Redisplay splits
+                    displaySplits(rowId, scannedPages[pageIndex].splits);
+                    
+                    // Save state
+                    saveState();
+                }
+            }
         }
 
         async function findCards(sourceCanvas, pageIndex) {
@@ -477,7 +603,7 @@
             // Step 2: HEAVY Gaussian Blur (make letters disappear!)
             console.log('Step 2: Applying Gaussian blur...');
             console.log('  (Blurring until individual letters disappear)');
-            const blurred = gaussianBlur(gray, width, height, 15); // Reduced from 25 to 15
+            const blurred = gaussianBlur(gray, width, height, 15);
 
             // Step 3: Invert (text becomes white, background becomes black)
             console.log('Step 3: Inverting image...');
@@ -489,7 +615,7 @@
             // Step 4: Threshold (turn grey clouds into solid black blocks)
             console.log('Step 4: Thresholding...');
             const binary = new Uint8ClampedArray(width * height);
-            const threshold = 25; // Lower threshold to catch fainter boundaries
+            const threshold = 25;
 
             for (let i = 0; i < inverted.length; i++) {
                 binary[i] = inverted[i] > threshold ? 255 : 0;
@@ -501,32 +627,25 @@
             }
             console.log(`  ${whitePixels} white pixels (${(whitePixels/binary.length*100).toFixed(1)}%)`);
 
-            // ADD VIRTUAL BOUNDARIES: Draw white borders at scan edges
+            // ADD VIRTUAL BOUNDARIES
             console.log('\nStep 4.5: Adding virtual boundaries at scan edges...');
-            const borderWidth = 30; // 30px white border
+            const borderWidth = 30;
 
-            // Top border
             for (let y = 0; y < borderWidth; y++) {
                 for (let x = 0; x < width; x++) {
-                    binary[y * width + x] = 0; // Black (background)
+                    binary[y * width + x] = 0;
                 }
             }
-
-            // Bottom border
             for (let y = height - borderWidth; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     binary[y * width + x] = 0;
                 }
             }
-
-            // Left border
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < borderWidth; x++) {
                     binary[y * width + x] = 0;
                 }
             }
-
-            // Right border
             for (let y = 0; y < height; y++) {
                 for (let x = width - borderWidth; x < width; x++) {
                     binary[y * width + x] = 0;
@@ -535,14 +654,14 @@
 
             console.log(`  Added ${borderWidth}px black borders on all edges`);
 
-            // Step 5: Light dilation to ensure blobs are solid
+            // Step 5: Light dilation
             console.log('\nStep 5: Light dilation to solidify blobs...');
             let morphed = binary.slice();
             for (let iter = 0; iter < 3; iter++) {
                 morphed = morphDilate(morphed, width, height, 5);
             }
 
-            // Step 6: Find contours (coastlines of black blobs)
+            // Step 6: Find contours
             console.log('\nStep 6: Finding contours (blob coastlines)...');
             const contours = findConnectedComponents(morphed, width, height);
             console.log(`  Found ${contours.length} contours`);
@@ -563,16 +682,13 @@
 
             console.log(`\n✓ Found ${boxes.length} obituaries`);
 
-            // Step 8: Crop original image using bounding boxes
+            // Step 8: Crop and rotate
             console.log('\nStep 8: Cropping original image with rotation-aware expansion...');
             const cards = [];
 
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
 
-                // APPROACH: Detect rotation, expand in the direction that will become "top" after rotation
-
-                // Step 1: Initial crop with generous padding
                 const initialPadding = 250;
                 const x1 = Math.max(0, box.x - initialPadding);
                 const y1 = Math.max(0, box.y - initialPadding);
@@ -584,28 +700,22 @@
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
                 
-               // Step 2: Detect rotation using a SMALL center sample
                 let rotationAngle = 0;
                 try {
                     console.log(`  Obit ${i+1}: Detecting rotation (optimized)...`);
                     
-                    // Create a small center sample to speed up Tesseract
                     const sampleSize = 400;
                     const sampleCanvas = document.createElement('canvas');
                     sampleCanvas.width = sampleSize;
                     sampleCanvas.height = sampleSize;
                     
-                    // Grab the middle of the current obituary crop
                     const sx = Math.max(0, (tempCanvas.width - sampleSize) / 2);
                     const sy = Math.max(0, (tempCanvas.height - sampleSize) / 2);
                     sampleCanvas.getContext('2d').drawImage(tempCanvas, sx, sy, sampleSize, sampleSize, 0, 0, sampleSize, sampleSize);
                 
-                    // Test all 4 rotations on the SMALL sample in parallel
                     const angles = [0, 90, 180, 270];
                     const rotationPromises = angles.map(async (angle) => {
                         const testCanvas = angle === 0 ? sampleCanvas : rotateCanvas(sampleCanvas, angle);
-                        // Using "Orientation and Script Detection" mode (OSD) is faster if supported, 
-                        // but simple recognize on a small image is very reliable.
                         const result = await tesseractWorker.recognize(testCanvas);
                         return { angle, confidence: result.data.confidence };
                     });
@@ -619,19 +729,12 @@
                     console.log(`    Rotation detection failed, using 0°`, err);
                 }
 
-                // Step 3: Calculate final crop with top expansion
-                // KEY: After we rotate the crop, which direction becomes "top"?
-                // If we need to rotate 90° CW, the LEFT side becomes top
-                // If we need to rotate 180°, the BOTTOM becomes top
-                // If we need to rotate 270° CW, the RIGHT side becomes top
-
                 const topExpansion = 200;
                 const sidePadding = 40;
 
                 let finalX, finalY, finalW, finalH;
 
                 if (rotationAngle === 0) {
-                    // No rotation needed - expand UP
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - topExpansion);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
@@ -639,7 +742,6 @@
                     console.log(`    Direction: UP (y - ${topExpansion})`);
 
                 } else if (rotationAngle === 90) {
-                    // Rotate 90° CW - LEFT side becomes top, so expand LEFT
                     finalX = Math.max(0, box.x - topExpansion);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
@@ -647,15 +749,13 @@
                     console.log(`    Direction: LEFT (x - ${topExpansion})`);
 
                 } else if (rotationAngle === 180) {
-                    // Rotate 180° - BOTTOM becomes top, so expand DOWN
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
                     console.log(`    Direction: DOWN (h + ${topExpansion})`);
 
-                } else { // 270
-                    // Rotate 270° CW (90° CCW) - RIGHT side becomes top, so expand RIGHT
+                } else {
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
@@ -663,13 +763,11 @@
                     console.log(`    Direction: RIGHT (w + ${topExpansion})`);
                 }
 
-                // Step 4: Crop from original with calculated box
                 const finalCanvas = document.createElement('canvas');
                 finalCanvas.width = finalW;
                 finalCanvas.height = finalH;
                 finalCanvas.getContext('2d').drawImage(sourceCanvas, finalX, finalY, finalW, finalH, 0, 0, finalW, finalH);
 
-                // Step 5: Rotate to correct orientation
                 let rotatedCanvas = finalCanvas;
                 if (rotationAngle > 0) {
                     rotatedCanvas = rotateCanvas(finalCanvas, rotationAngle);
@@ -689,10 +787,8 @@
         }
 
         function gaussianBlur(gray, width, height, radius) {
-            // Heavy Gaussian blur to make letters disappear
             console.log(`  Blur radius: ${radius}px`);
 
-            // Create Gaussian kernel
             const kernel = [];
             const sigma = radius / 3;
             let sum = 0;
@@ -703,12 +799,10 @@
                 sum += value;
             }
 
-            // Normalize kernel
             for (let i = 0; i < kernel.length; i++) {
                 kernel[i] /= sum;
             }
 
-            // Horizontal pass
             const temp = new Uint8ClampedArray(width * height);
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
@@ -725,7 +819,6 @@
                 }
             }
 
-            // Vertical pass
             const output = new Uint8ClampedArray(width * height);
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
@@ -755,7 +848,6 @@
 
                 console.log(`  Box: ${box.w}x${box.h} at (${box.x},${box.y}) - ${areaPercent.toFixed(1)}%`);
 
-                // Filter criteria
                 if (box.w < 150 || box.h < 150) {
                     console.log(`    ✗ Too small`);
                     continue;
@@ -776,7 +868,6 @@
                     continue;
                 }
 
-                // Check if box might be multiple obituaries merged
                 if (areaPercent > 25 || aspectRatio > 3.5) {
                     console.log(`    ! Large/tall box - checking for merged obituaries...`);
                     const splitBoxes = trySplitBox(box, width, height);
@@ -794,7 +885,6 @@
                 valid.push(box);
             }
 
-            // Sort by position (top to bottom, left to right)
             valid.sort((a, b) => {
                 const yDiff = a.y - b.y;
                 if (Math.abs(yDiff) < height * 0.12) {
@@ -807,25 +897,11 @@
         }
 
         function trySplitBox(box, imgWidth, imgHeight) {
-            // Try to split a large box by finding horizontal whitespace gaps
-            // This catches obituaries that got merged because they touch
-
             console.log(`      Analyzing for splits...`);
-
-            // Look for horizontal white strips (gaps between obituaries)
-            const minGapHeight = 15; // At least 15px of whitespace
-            const whiteThreshold = 0.90; // 90% white = gap
-
-            const rowWhiteness = new Float32Array(box.h);
-
-            // We need access to the original gray image, but we don't have it here
-            // Instead, use a simpler heuristic: split very tall boxes in half
 
             const aspectRatio = Math.max(box.w, box.h) / Math.min(box.w, box.h);
 
-            // If aspect ratio > 3.5, likely stacked obituaries
             if (aspectRatio > 3.5 && box.h > box.w) {
-                // Split vertically in half
                 console.log(`      Splitting tall box (AR=${aspectRatio.toFixed(1)})`);
 
                 const midY = Math.floor(box.h / 2);
@@ -848,7 +924,6 @@
                 ];
             }
 
-            // If very wide, split horizontally
             if (aspectRatio > 3.5 && box.w > box.h) {
                 console.log(`      Splitting wide box (AR=${aspectRatio.toFixed(1)})`);
 
@@ -872,7 +947,6 @@
                 ];
             }
 
-            // Can't split
             return [box];
         }
 
@@ -924,113 +998,6 @@
             };
         }
 
-        function calculateOtsuThreshold(gray) {
-            // Build histogram
-            const histogram = new Array(256).fill(0);
-            for (let i = 0; i < gray.length; i++) {
-                histogram[gray[i]]++;
-            }
-
-            const total = gray.length;
-            let sum = 0;
-            for (let i = 0; i < 256; i++) {
-                sum += i * histogram[i];
-            }
-
-            let sumB = 0, wB = 0, wF = 0;
-            let maxVariance = 0;
-            let threshold = 0;
-
-            for (let t = 0; t < 256; t++) {
-                wB += histogram[t];
-                if (wB === 0) continue;
-
-                wF = total - wB;
-                if (wF === 0) break;
-
-                sumB += t * histogram[t];
-                const mB = sumB / wB;
-                const mF = (sum - sumB) / wF;
-
-                const variance = wB * wF * (mB - mF) * (mB - mF);
-
-                if (variance > maxVariance) {
-                    maxVariance = variance;
-                    threshold = t;
-                }
-            }
-
-            return threshold;
-        }
-
-        function scoreDetectionResult(regions, width, height) {
-            if (regions.length === 0) return 0;
-
-            let score = 0;
-
-            // Prefer 3-6 obituaries (most common)
-            if (regions.length >= 3 && regions.length <= 6) {
-                score += 50;
-            } else if (regions.length >= 2 && regions.length <= 8) {
-                score += 30;
-            } else {
-                score += 10;
-            }
-
-            // Check size consistency
-            const avgArea = regions.reduce((sum, r) => sum + r.area, 0) / regions.length;
-            const areaVariance = regions.reduce((sum, r) => sum + Math.abs(r.area - avgArea), 0) / regions.length;
-            const consistency = 1 - (areaVariance / avgArea);
-            score += consistency * 30;
-
-            // Prefer reasonable sizes
-            const totalImageArea = width * height;
-            const totalObitArea = regions.reduce((sum, r) => sum + r.area, 0);
-            const coverage = totalObitArea / totalImageArea;
-
-            if (coverage > 0.4 && coverage < 0.85) {
-                score += 20; // Good coverage
-            }
-
-            return score;
-        }
-
-        function floodFillContour(binary, visited, width, height, startX, startY) {
-            const stack = [[startX, startY]];
-            let minX = startX, maxX = startX;
-            let minY = startY, maxY = startY;
-            let pixelCount = 0;
-
-            while (stack.length > 0) {
-                const [x, y] = stack.pop();
-                const idx = y * width + x;
-
-                if (x < 0 || x >= width || y < 0 || y >= height) continue;
-                if (visited[idx] || binary[idx] !== 255) continue;
-
-                visited[idx] = 1;
-                pixelCount++;
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
-
-                stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
-            }
-
-            const w = maxX - minX + 1;
-            const h = maxY - minY + 1;
-
-            return {
-                x: minX,
-                y: minY,
-                w: w,
-                h: h,
-                area: w * h,
-                pixelCount: pixelCount
-            };
-        }
-
         function morphDilate(binary, width, height, kernelSize) {
             const result = new Uint8ClampedArray(width * height);
             const halfKernel = Math.floor(kernelSize / 2);
@@ -1052,54 +1019,6 @@
             return result;
         }
 
-        function morphErode(binary, width, height, kernelSize) {
-            const result = new Uint8ClampedArray(width * height);
-            const halfKernel = Math.floor(kernelSize / 2);
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    let minVal = 255;
-                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
-                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
-                            const ny = y + ky, nx = x + kx;
-                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                                minVal = Math.min(minVal, binary[ny * width + nx]);
-                            }
-                        }
-                    }
-                    result[y * width + x] = minVal;
-                }
-            }
-            return result;
-        }
-
-        async function autoRotate(card) {
-            if (!tesseractWorker) tesseractWorker = await Tesseract.createWorker('eng');
-
-            const sample = document.createElement('canvas');
-            sample.width = sample.height = 300;
-            const sctx = sample.getContext('2d');
-            sctx.drawImage(card.canvas, (card.canvas.width - 300) / 2, (card.canvas.height - 300) / 2, 300, 300, 0, 0, 300, 300);
-
-            let best = 0, bestConf = 0;
-            for (let r = 0; r < 4; r++) {
-                const rotated = rotateCanvas(sample, r * 90);
-                try {
-                    const result = await tesseractWorker.recognize(rotated);
-                    if (result.data.confidence > bestConf) {
-                        bestConf = result.data.confidence;
-                        best = r;
-                    }
-                } catch (err) {}
-            }
-
-            if (best > 0) {
-                card.canvas = rotateCanvas(card.canvas, best * 90);
-                card.rotated = true;
-            }
-            card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
-        }
-
         function rotateCanvas(canvas, degrees) {
             const nc = document.createElement('canvas');
             const ctx = nc.getContext('2d');
@@ -1118,14 +1037,11 @@
 
         function clearAllScans() {
             if (confirm('Clear all obituaries including saved ones? This cannot be undone.')) {
-                // Clear saved state
                 clearState();
-                // Reload page
                 location.reload();
             }
         }
 
-        // ========== SIMPLIFIED GRID VIEW ==========
         function showGrid() {
             // Collect newly processed obituaries
             const newObituaries = [];
@@ -1140,15 +1056,12 @@
                 });
             });
 
-            // Load any previously saved obituaries
-            const savedObituaries = loadState();
-            
-            // Merge: saved obituaries first, then new ones
-            if (savedObituaries && savedObituaries.length > 0) {
-                allObituaries = [...savedObituaries, ...newObituaries];
-                console.log(`Loaded ${savedObituaries.length} saved obituaries + ${newObituaries.length} new = ${allObituaries.length} total`);
-            } else {
+            // Merge with existing obituaries
+            if (allObituaries.length === 0) {
                 allObituaries = newObituaries;
+            } else {
+                // Add only new ones
+                allObituaries = [...allObituaries, ...newObituaries];
             }
 
             if (allObituaries.length === 0) {
@@ -1159,12 +1072,7 @@
             // Save the combined state
             saveState();
 
-            if (allObituaries.length === 0) {
-                alert('No obituaries found!');
-                return;
-            }
-
-            // Create and show grid (no buttons on this page)
+            // Create and show grid
             const gridHTML = `
                 <style>
                     :root {
@@ -1209,10 +1117,34 @@
                     }
                     .grid-item {
                         background: var(--bg-medium);
+                        cursor: pointer;
+                        border: 2px solid var(--border);
+                        border-radius: 8px;
+                        overflow: hidden;
+                        transition: transform 0.2s, box-shadow 0.2s;
+                        position: relative;
+                        aspect-ratio: 1;
                     }
                     .grid-item:hover {
                         transform: translateY(-4px);
                         box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+                    }
+                    .grid-item img {
+                        width: 100%;
+                        height: 100%;
+                        object-fit: cover;
+                        display: block;
+                    }
+                    .grid-item-label {
+                        padding: 10px;
+                        background: rgba(45, 45, 45, 0.95);
+                        text-align: center;
+                        font-size: 0.9rem;
+                        color: var(--text-primary);
+                        position: absolute;
+                        bottom: 0;
+                        left: 0;
+                        right: 0;
                     }
                 </style>
                 <div style="max-width: 1400px; margin: 0 auto; padding: 40px 20px;">
@@ -1227,9 +1159,9 @@
                     </div>
                     <div id="obituaryGrid" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px;">
                         ${allObituaries.map((obit, index) => `
-                            <div class="grid-item" onclick="viewFullImage(${index})" style="cursor: pointer; border: 2px solid var(--border); border-radius: 8px; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s; background: var(--bg-medium);">
-                                <img src="${obit.image}" style="width: 100%; height: auto; display: block;" />
-                                <div style="padding: 10px; background: var(--bg-secondary); text-align: center; font-size: 0.9rem; color: var(--text-primary);">
+                            <div class="grid-item" onclick="viewFullImage(${index})">
+                                <img src="${obit.image}" />
+                                <div class="grid-item-label">
                                     Obituary ${index + 1}
                                 </div>
                             </div>
@@ -1244,7 +1176,6 @@
         function viewFullImage(index) {
             const obit = allObituaries[index];
 
-            // Create new page with image and buttons
             document.body.innerHTML = `
                 <style>
                     :root {
@@ -1373,13 +1304,18 @@
                 </button>
             `;
 
-            // Add event listeners after DOM is created
-            document.getElementById('backToGridBtn').addEventListener('click', () => showGrid());
+            document.getElementById('backToGridBtn').addEventListener('click', () => {
+                // Reload obituaries from saved state before showing grid
+                const saved = loadState();
+                if (saved && saved.obituaries) {
+                    allObituaries = saved.obituaries;
+                }
+                showGrid();
+            });
             document.getElementById('unsureBtn').addEventListener('click', () => markUnsure(index));
             document.getElementById('doneBtn').addEventListener('click', () => markDone(index));
-            document.getElementById('viewFullScanBtn').addEventListener('click', () => viewFullScan(index));
+            document.getElementById('viewFullScanBtn').addEventListener('click', () => viewFullScanFromObit(index));
 
-            // Initialize zoom and pan for obituary image
             initZoomPan('viewContent', 'obitImage');
         }
 
@@ -1396,7 +1332,6 @@
             let lastPosX = 0;
             let lastPosY = 0;
 
-            // Wait for image to load, then center it
             if (image.complete) {
                 centerImage();
             } else {
@@ -1404,7 +1339,6 @@
             }
 
             function centerImage() {
-                // Center the image initially
                 const containerRect = container.getBoundingClientRect();
                 const imageRect = image.getBoundingClientRect();
                 posX = (containerRect.width - imageRect.width) / 2;
@@ -1417,36 +1351,26 @@
                 image.style.transformOrigin = '0 0';
             }
 
-            // Zoom with mouse wheel - pin the exact pixel under the mouse
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
 
-                // Get mouse position relative to viewport
                 const mouseX = e.clientX;
                 const mouseY = e.clientY;
 
-                // Get image's natural dimensions
                 const imageNaturalWidth = image.naturalWidth;
                 const imageNaturalHeight = image.naturalHeight;
 
-                // Get image's rendered dimensions
                 const imageRenderedWidth = image.offsetWidth;
                 const imageRenderedHeight = image.offsetHeight;
 
-                // Calculate the scaling factor between natural and rendered size
                 const renderScale = imageRenderedWidth / imageNaturalWidth;
 
-                // Find which pixel of the ORIGINAL image is under the mouse
-                // Account for: position offset, current scale, and initial render scale
                 const imagePixelX = ((mouseX - posX) / scale) / renderScale;
                 const imagePixelY = ((mouseY - posY) / scale) / renderScale;
 
-                // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.5, Math.min(10, scale * delta));
 
-                // Calculate new position to keep that exact pixel under the mouse
-                // mouseX = imagePixelX * renderScale * newScale + newPosX
                 posX = mouseX - (imagePixelX * renderScale * newScale);
                 posY = mouseY - (imagePixelY * renderScale * newScale);
 
@@ -1454,7 +1378,6 @@
                 updateTransform();
             }, { passive: false });
 
-            // Pan with click and drag (only on image)
             image.addEventListener('mousedown', (e) => {
                 isDragging = true;
                 dragStartX = e.clientX;
@@ -1481,16 +1404,46 @@
             });
         }
 
-        function viewFullScan(index) {
+        function viewFullScanImage(imageUrl) {
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.95);
+                z-index: 10000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+            `;
+            
+            overlay.innerHTML = `
+                <img src="${imageUrl}" style="max-width: 95%; max-height: 95%; object-fit: contain;" />
+            `;
+            
+            overlay.addEventListener('click', () => overlay.remove());
+            document.body.appendChild(overlay);
+        }
+
+        function viewFullScanFromObit(index) {
             const obit = allObituaries[index];
-            const page = scannedPages.find(p => p.splits.some(s => s.sourcePageIndex === obit.sourcePageIndex));
+            const saved = loadState();
+            
+            if (!saved || !saved.scannedPages) {
+                alert('Original scan not available');
+                return;
+            }
+            
+            const page = saved.scannedPages.find(p => p.filename === obit.sourceFilename);
 
             if (!page) {
                 alert('Original scan not found');
                 return;
             }
 
-            // Create popup overlay
             const overlay = document.createElement('div');
             overlay.id = 'fullScanOverlay';
             overlay.style.cssText = `
@@ -1554,7 +1507,6 @@
 
             document.body.appendChild(overlay);
 
-            // Event listeners
             document.getElementById('closeScanBtn').addEventListener('click', () => {
                 overlay.remove();
             });
@@ -1568,7 +1520,6 @@
                 scanImage.style.transform = `${baseTransform} rotate(${rotation}deg)`;
             });
 
-            // Initialize zoom and pan for full scan
             initZoomPanForScan('scanContent', 'scanImage');
         }
 
@@ -1585,7 +1536,6 @@
             let lastPosX = 0;
             let lastPosY = 0;
 
-            // Wait for image to load, then center it
             if (image.complete) {
                 centerImage();
             } else {
@@ -1593,7 +1543,6 @@
             }
 
             function centerImage() {
-                // Center the image initially
                 const containerRect = container.getBoundingClientRect();
                 const imageRect = image.getBoundingClientRect();
                 posX = (containerRect.width - imageRect.width) / 2;
@@ -1609,32 +1558,25 @@
                 image.style.transformOrigin = '0 0';
             }
 
-            // Zoom with mouse wheel - pin the exact pixel under the mouse
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
 
-                // Get mouse position relative to viewport
                 const mouseX = e.clientX;
                 const mouseY = e.clientY;
 
-                // Get image dimensions
                 const imageNaturalWidth = image.naturalWidth;
                 const imageNaturalHeight = image.naturalHeight;
                 const imageRenderedWidth = image.offsetWidth;
                 const imageRenderedHeight = image.offsetHeight;
 
-                // Calculate render scale
                 const renderScale = imageRenderedWidth / imageNaturalWidth;
 
-                // Find which pixel of the original image is under the mouse
                 const imagePixelX = ((mouseX - posX) / scale) / renderScale;
                 const imagePixelY = ((mouseY - posY) / scale) / renderScale;
 
-                // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.1, Math.min(20, scale * delta));
 
-                // Calculate new position to keep that exact pixel under the mouse
                 posX = mouseX - (imagePixelX * renderScale * newScale);
                 posY = mouseY - (imagePixelY * renderScale * newScale);
 
@@ -1642,7 +1584,6 @@
                 updateTransform();
             }, { passive: false });
 
-            // Pan with click and drag (only on image, no bounds)
             image.addEventListener('mousedown', (e) => {
                 isDragging = true;
                 dragStartX = e.clientX;
@@ -1658,7 +1599,6 @@
                 const dx = e.clientX - dragStartX;
                 const dy = e.clientY - dragStartY;
 
-                // No bounds - allow infinite panning
                 posX = lastPosX + dx;
                 posY = lastPosY + dy;
 
@@ -1672,12 +1612,11 @@
 
         function markUnsure(index) {
             if (confirm('Mark this obituary as "Unsure" for later review?')) {
-                // Mark as unsure and go to next or back to grid
                 alert('Marked as unsure!');
                 if (index + 1 < allObituaries.length) {
-                    viewFullImage(index + 1); // Next obituary
+                    viewFullImage(index + 1);
                 } else {
-                    showGrid(); // Back to grid if last one
+                    showGrid();
                 }
             }
         }
@@ -1686,10 +1625,10 @@
             if (confirm('Mark this obituary as complete?')) {
                 alert('Marked as done!');
                 if (index + 1 < allObituaries.length) {
-                    viewFullImage(index + 1); // Next obituary
+                    viewFullImage(index + 1);
                 } else {
-                    // All done!
                     if (confirm(`All ${allObituaries.length} obituaries reviewed! Start over?`)) {
+                        clearState();
                         location.reload();
                     } else {
                         showGrid();
@@ -1699,20 +1638,24 @@
         }
 
         function backToUpload() {
-            // Save current state to localStorage before going back
             saveState();
-            
-            // Reload to upload screen
             location.reload();
         }
 
         function saveState() {
-            // Save the current obituaries to localStorage
             const state = {
                 obituaries: allObituaries.map(obit => ({
                     image: obit.image,
                     sourcePageIndex: obit.sourcePageIndex,
                     sourceFilename: obit.sourceFilename
+                })),
+                scannedPages: scannedPages.map(page => ({
+                    originalImage: page.originalImage,
+                    filename: page.filename,
+                    splits: page.splits.map(split => ({
+                        dataUrl: split.dataUrl,
+                        sourcePageIndex: split.sourcePageIndex
+                    }))
                 })),
                 timestamp: Date.now()
             };
@@ -1720,14 +1663,12 @@
         }
 
         function loadState() {
-            // Load previously saved obituaries
             const saved = localStorage.getItem('obituary_scanner_state');
             if (saved) {
                 try {
                     const state = JSON.parse(saved);
-                    // Check if state is less than 24 hours old
                     if (Date.now() - state.timestamp < 24 * 60 * 60 * 1000) {
-                        return state.obituaries;
+                        return state;
                     }
                 } catch (e) {
                     console.error('Failed to load state:', e);

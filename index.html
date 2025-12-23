@@ -317,29 +317,6 @@
             console.log('fileInput:', fileInput);
             console.log('dropZone:', dropZone);
 
-            // Check for saved obituaries and scanned pages
-            const saved = loadState();
-            if (saved) {
-                if (saved.obituaries && saved.obituaries.length > 0) {
-                    allObituaries = saved.obituaries;
-                    showStatus(`📋 ${saved.obituaries.length} obituaries from previous session. Upload more to add them, or click "Clear All" to start fresh.`, 'info');
-                    document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
-                }
-                
-                // Restore scanned pages
-                if (saved.scannedPages && saved.scannedPages.length > 0) {
-                    scannedPages = saved.scannedPages;
-                    // Redisplay all scans
-                    scannedPages.forEach((page, index) => {
-                        const rowId = `scan-row-${index}`;
-                        addScanRow(rowId, page.originalImage, page.filename);
-                        displaySplits(rowId, page.splits);
-                    });
-                    document.getElementById('verifyControls').classList.remove('hidden');
-                    document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
-                }
-            }
-
             fileInput.addEventListener('change', handleFiles);
             dropZone.addEventListener('dragover', (e) => {
                 e.preventDefault();
@@ -443,9 +420,6 @@
             // Re-enable Next button
             nextButton.disabled = false;
             nextButton.textContent = '➡️ Next';
-            
-            // Save state after processing
-            saveState();
             
             // Reset file input
             document.getElementById('fileInput').value = '';
@@ -570,9 +544,6 @@
                 } else {
                     showStatus(`${scannedPages.length} scan(s) remaining.`, 'success');
                 }
-                
-                // Save state
-                saveState();
             }
         }
 
@@ -586,9 +557,6 @@
                     
                     // Redisplay splits
                     displaySplits(rowId, scannedPages[pageIndex].splits);
-                    
-                    // Save state
-                    saveState();
                 }
             }
         }
@@ -1073,9 +1041,6 @@
                 return;
             }
 
-            // Save the combined state
-            saveState();
-
             // Create and show grid
             const gridHTML = `
                 <style>
@@ -1309,11 +1274,6 @@
             `;
 
             document.getElementById('backToGridBtn').addEventListener('click', () => {
-                // Reload obituaries from saved state before showing grid
-                const saved = loadState();
-                if (saved && saved.obituaries) {
-                    allObituaries = saved.obituaries;
-                }
                 showGrid();
             });
             document.getElementById('unsureBtn').addEventListener('click', () => markUnsure(index));
@@ -1434,14 +1394,13 @@
 
         function viewFullScanFromObit(index) {
             const obit = allObituaries[index];
-            const saved = loadState();
             
-            if (!saved || !saved.scannedPages) {
+            if (!scannedPages || scannedPages.length === 0) {
                 alert('Original scan not available');
                 return;
             }
             
-            const page = saved.scannedPages.find(p => p.filename === obit.sourceFilename);
+            const page = scannedPages.find(p => p.filename === obit.sourceFilename);
 
             if (!page) {
                 alert('Original scan not found');
@@ -1642,47 +1601,29 @@
         }
 
         function backToUpload() {
-            saveState();
+            // Don't reload - just recreate the upload page HTML
             location.reload();
         }
 
         function saveState() {
-            const state = {
-                obituaries: allObituaries.map(obit => ({
-                    image: obit.image,
-                    sourcePageIndex: obit.sourcePageIndex,
-                    sourceFilename: obit.sourceFilename
-                })),
-                scannedPages: scannedPages.map(page => ({
-                    originalImage: page.originalImage,
-                    filename: page.filename,
-                    splits: page.splits.map(split => ({
-                        dataUrl: split.dataUrl,
-                        sourcePageIndex: split.sourcePageIndex
-                    }))
-                })),
-                timestamp: Date.now()
-            };
-            localStorage.setItem('obituary_scanner_state', JSON.stringify(state));
+            // Don't save to localStorage - images are too large
+            // State is kept in memory (scannedPages, allObituaries)
+            console.log('State kept in memory:', {
+                scannedPages: scannedPages.length,
+                allObituaries: allObituaries.length
+            });
         }
 
         function loadState() {
-            const saved = localStorage.getItem('obituary_scanner_state');
-            if (saved) {
-                try {
-                    const state = JSON.parse(saved);
-                    if (Date.now() - state.timestamp < 24 * 60 * 60 * 1000) {
-                        return state;
-                    }
-                } catch (e) {
-                    console.error('Failed to load state:', e);
-                }
-            }
+            // State is kept in memory during session
+            // Return null to indicate no persisted state
             return null;
         }
 
         function clearState() {
-            localStorage.removeItem('obituary_scanner_state');
+            // Clear memory state
+            scannedPages = [];
+            allObituaries = [];
         }
     </script>
 </body>

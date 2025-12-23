@@ -583,31 +583,40 @@
                 tempCanvas.width = w1;
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
-
-                // Step 2: Detect rotation
+                
+               // Step 2: Detect rotation using a SMALL center sample
                 let rotationAngle = 0;
                 try {
-                    console.log(`  Obit ${i+1}: Detecting rotation...`);
-                    // NEW: Run all 4 rotation checks at the same time
+                    console.log(`  Obit ${i+1}: Detecting rotation (optimized)...`);
+                    
+                    // Create a small center sample to speed up Tesseract
+                    const sampleSize = 400;
+                    const sampleCanvas = document.createElement('canvas');
+                    sampleCanvas.width = sampleSize;
+                    sampleCanvas.height = sampleSize;
+                    
+                    // Grab the middle of the current obituary crop
+                    const sx = Math.max(0, (tempCanvas.width - sampleSize) / 2);
+                    const sy = Math.max(0, (tempCanvas.height - sampleSize) / 2);
+                    sampleCanvas.getContext('2d').drawImage(tempCanvas, sx, sy, sampleSize, sampleSize, 0, 0, sampleSize, sampleSize);
+                
+                    // Test all 4 rotations on the SMALL sample in parallel
                     const angles = [0, 90, 180, 270];
                     const rotationPromises = angles.map(async (angle) => {
-                        const testCanvas = angle === 0 ? tempCanvas : rotateCanvas(tempCanvas, angle);
+                        const testCanvas = angle === 0 ? sampleCanvas : rotateCanvas(sampleCanvas, angle);
+                        // Using "Orientation and Script Detection" mode (OSD) is faster if supported, 
+                        // but simple recognize on a small image is very reliable.
                         const result = await tesseractWorker.recognize(testCanvas);
                         return { angle, confidence: result.data.confidence };
                     });
-                    
+                
                     const results = await Promise.all(rotationPromises);
-                    
-                    // Simply pick the result with the highest confidence
-                    let bestResult = results.reduce((prev, current) => 
-                        (prev.confidence > current.confidence) ? prev : current
-                    );
+                    const bestResult = results.reduce((prev, current) => (prev.confidence > current.confidence) ? prev : current);
                     
                     rotationAngle = bestResult.angle;
-                    let bestConf = bestResult.confidence;
-                    console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
+                    console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestResult.confidence.toFixed(1)}%)`);
                 } catch (err) {
-                    console.log(`    Rotation detection failed, using 0°`);
+                    console.log(`    Rotation detection failed, using 0°`, err);
                 }
 
                 // Step 3: Calculate final crop with top expansion

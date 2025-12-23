@@ -22,7 +22,7 @@
         }
 
         .container { max-width: 1800px; margin: 0 auto; padding: 20px; }
-        
+
         header {
             text-align: center; padding: 30px 20px;
             background: linear-gradient(135deg, var(--bg-medium) 0%, var(--bg-light) 100%);
@@ -99,7 +99,7 @@
         }
         .split-card:hover { border-color: var(--accent-blue); transform: scale(1.02); }
         .split-card:hover .delete-split-btn { opacity: 1; }
-        
+
         .delete-split-btn {
             position: absolute;
             top: 5px;
@@ -120,7 +120,7 @@
         .delete-split-btn:hover {
             background: #dc2626;
         }
-        
+
         .split-card img {
             width: 100%; height: 180px; object-fit: contain;
             border-radius: 4px; margin-bottom: 8px;
@@ -224,7 +224,7 @@
         <header>
             <h1>📄 Obituary Scanner</h1>
             <p style="color: var(--text-secondary); margin-top: 10px;">Upload scans → Verify splits → Extract text</p>
-            
+
         </header>
 
         <div id="uploadSection">
@@ -324,14 +324,14 @@
                 const file = files[i];
                 const pageIndex = scannedPages.length + i;
                 const rowId = `scan-row-${pageIndex}`;
-                
+
                 // Load image data
                 const imageData = await loadImageFile(file);
-                
+
                 // Add row immediately with "Processing..." message
                 addScanRow(rowId, imageData.dataUrl, file.name);
                 showScanProcessing(rowId);
-                
+
                 // Store for batch processing
                 pendingScans.push({
                     rowId,
@@ -350,6 +350,7 @@
                 tesseractWorker = await Tesseract.createWorker('eng');
             }
             
+            // STEP 2: Process all splits in batch (now includes fast rotation detection)
             for (const scan of pendingScans) {
                 const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
                 // Note: Rotation is now handled inside findCards
@@ -381,7 +382,7 @@
                         canvas.width = img.width;
                         canvas.height = img.height;
                         ctx.drawImage(img, 0, 0);
-                        
+
                         resolve({
                             dataUrl: e.target.result,
                             canvas: canvas
@@ -487,7 +488,7 @@
             console.log('Step 4: Thresholding...');
             const binary = new Uint8ClampedArray(width * height);
             const threshold = 25; // Lower threshold to catch fainter boundaries
-            
+
             for (let i = 0; i < inverted.length; i++) {
                 binary[i] = inverted[i] > threshold ? 255 : 0;
             }
@@ -501,35 +502,35 @@
             // ADD VIRTUAL BOUNDARIES: Draw white borders at scan edges
             console.log('\nStep 4.5: Adding virtual boundaries at scan edges...');
             const borderWidth = 30; // 30px white border
-            
+
             // Top border
             for (let y = 0; y < borderWidth; y++) {
                 for (let x = 0; x < width; x++) {
                     binary[y * width + x] = 0; // Black (background)
                 }
             }
-            
+
             // Bottom border
             for (let y = height - borderWidth; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     binary[y * width + x] = 0;
                 }
             }
-            
+
             // Left border
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < borderWidth; x++) {
                     binary[y * width + x] = 0;
                 }
             }
-            
+
             // Right border
             for (let y = 0; y < height; y++) {
                 for (let x = width - borderWidth; x < width; x++) {
                     binary[y * width + x] = 0;
                 }
             }
-            
+
             console.log(`  Added ${borderWidth}px black borders on all edges`);
 
             // Step 5: Light dilation to ensure blobs are solid
@@ -563,25 +564,27 @@
             // Step 8: Crop original image using bounding boxes
             console.log('\nStep 8: Cropping original image with rotation-aware expansion...');
             const cards = [];
-            
+
             for (let i = 0; i < boxes.length; i++) {
                 const box = boxes[i];
-                
+
                 // APPROACH: Detect rotation, expand in the direction that will become "top" after rotation
-                
+
                 // Step 1: Initial crop with generous padding
                 const initialPadding = 250;
                 const x1 = Math.max(0, box.x - initialPadding);
                 const y1 = Math.max(0, box.y - initialPadding);
                 const w1 = Math.min(width - x1, box.w + 2 * initialPadding);
                 const h1 = Math.min(height - y1, box.h + 2 * initialPadding);
-                
+
                 const tempCanvas = document.createElement('canvas');
                 tempCanvas.width = w1;
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
-                
-                // Step 2: Detect rotation using OCR
+
+                // Step 2: Detect rotation
+                // Step 2: Fast rotation detection using image analysis (NO OCR!)
+                // Method: Analyze edge density in horizontal vs vertical directions
                 let rotationAngle = 0;
                 try {
                     console.log(`  Obit ${i+1}: Detecting rotation...`);
@@ -598,21 +601,24 @@
                         }
                     }
                     console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
+                    console.log(`  Obit ${i+1}: Detecting rotation (fast method)...`);
+                    rotationAngle = detectRotationFast(tempCanvas);
+                    console.log(`    Detected rotation: ${rotationAngle}°`);
                 } catch (err) {
                     console.log(`    Rotation detection failed, using 0°`);
                 }
-                
+
                 // Step 3: Calculate final crop with top expansion
                 // KEY: After we rotate the crop, which direction becomes "top"?
                 // If we need to rotate 90° CW, the LEFT side becomes top
                 // If we need to rotate 180°, the BOTTOM becomes top
                 // If we need to rotate 270° CW, the RIGHT side becomes top
-                
+
                 const topExpansion = 200;
                 const sidePadding = 40;
-                
+
                 let finalX, finalY, finalW, finalH;
-                
+
                 if (rotationAngle === 0) {
                     // No rotation needed - expand UP
                     finalX = Math.max(0, box.x - sidePadding);
@@ -620,7 +626,7 @@
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
                     console.log(`    Direction: UP (y - ${topExpansion})`);
-                    
+
                 } else if (rotationAngle === 90) {
                     // Rotate 90° CW - LEFT side becomes top, so expand LEFT
                     finalX = Math.max(0, box.x - topExpansion);
@@ -628,7 +634,7 @@
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
                     finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
                     console.log(`    Direction: LEFT (x - ${topExpansion})`);
-                    
+
                 } else if (rotationAngle === 180) {
                     // Rotate 180° - BOTTOM becomes top, so expand DOWN
                     finalX = Math.max(0, box.x - sidePadding);
@@ -636,7 +642,7 @@
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
                     console.log(`    Direction: DOWN (h + ${topExpansion})`);
-                    
+
                 } else { // 270
                     // Rotate 270° CW (90° CCW) - RIGHT side becomes top, so expand RIGHT
                     finalX = Math.max(0, box.x - sidePadding);
@@ -645,21 +651,21 @@
                     finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
                     console.log(`    Direction: RIGHT (w + ${topExpansion})`);
                 }
-                
+
                 // Step 4: Crop from original with calculated box
                 const finalCanvas = document.createElement('canvas');
                 finalCanvas.width = finalW;
                 finalCanvas.height = finalH;
                 finalCanvas.getContext('2d').drawImage(sourceCanvas, finalX, finalY, finalW, finalH, 0, 0, finalW, finalH);
-                
+
                 // Step 5: Rotate to correct orientation
                 let rotatedCanvas = finalCanvas;
                 if (rotationAngle > 0) {
                     rotatedCanvas = rotateCanvas(finalCanvas, rotationAngle);
                 }
-                
+
                 console.log(`    Final size: ${rotatedCanvas.width}x${rotatedCanvas.height}`);
-                
+
                 cards.push({
                     canvas: rotatedCanvas,
                     dataUrl: rotatedCanvas.toDataURL('image/jpeg', 0.95),
@@ -674,18 +680,18 @@
         function gaussianBlur(gray, width, height, radius) {
             // Heavy Gaussian blur to make letters disappear
             console.log(`  Blur radius: ${radius}px`);
-            
+
             // Create Gaussian kernel
             const kernel = [];
             const sigma = radius / 3;
             let sum = 0;
-            
+
             for (let i = -radius; i <= radius; i++) {
                 const value = Math.exp(-(i * i) / (2 * sigma * sigma));
                 kernel.push(value);
                 sum += value;
             }
-            
+
             // Normalize kernel
             for (let i = 0; i < kernel.length; i++) {
                 kernel[i] /= sum;
@@ -696,14 +702,14 @@
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     let value = 0;
-                    
+
                     for (let k = -radius; k <= radius; k++) {
                         const nx = x + k;
                         if (nx >= 0 && nx < width) {
                             value += gray[y * width + nx] * kernel[k + radius];
                         }
                     }
-                    
+
                     temp[y * width + x] = Math.round(value);
                 }
             }
@@ -713,14 +719,14 @@
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     let value = 0;
-                    
+
                     for (let k = -radius; k <= radius; k++) {
                         const ny = y + k;
                         if (ny >= 0 && ny < height) {
                             value += temp[ny * width + x] * kernel[k + radius];
                         }
                     }
-                    
+
                     output[y * width + x] = Math.round(value);
                 }
             }
@@ -763,7 +769,7 @@
                 if (areaPercent > 25 || aspectRatio > 3.5) {
                     console.log(`    ! Large/tall box - checking for merged obituaries...`);
                     const splitBoxes = trySplitBox(box, width, height);
-                    
+
                     if (splitBoxes.length > 1) {
                         console.log(`    ✓ Split into ${splitBoxes.length} pieces`);
                         valid.push(...splitBoxes);
@@ -792,27 +798,27 @@
         function trySplitBox(box, imgWidth, imgHeight) {
             // Try to split a large box by finding horizontal whitespace gaps
             // This catches obituaries that got merged because they touch
-            
+
             console.log(`      Analyzing for splits...`);
-            
+
             // Look for horizontal white strips (gaps between obituaries)
             const minGapHeight = 15; // At least 15px of whitespace
             const whiteThreshold = 0.90; // 90% white = gap
-            
+
             const rowWhiteness = new Float32Array(box.h);
-            
+
             // We need access to the original gray image, but we don't have it here
             // Instead, use a simpler heuristic: split very tall boxes in half
-            
+
             const aspectRatio = Math.max(box.w, box.h) / Math.min(box.w, box.h);
-            
+
             // If aspect ratio > 3.5, likely stacked obituaries
             if (aspectRatio > 3.5 && box.h > box.w) {
                 // Split vertically in half
                 console.log(`      Splitting tall box (AR=${aspectRatio.toFixed(1)})`);
-                
+
                 const midY = Math.floor(box.h / 2);
-                
+
                 return [
                     {
                         x: box.x,
@@ -830,13 +836,13 @@
                     }
                 ];
             }
-            
+
             // If very wide, split horizontally
             if (aspectRatio > 3.5 && box.w > box.h) {
                 console.log(`      Splitting wide box (AR=${aspectRatio.toFixed(1)})`);
-                
+
                 const midX = Math.floor(box.w / 2);
-                
+
                 return [
                     {
                         x: box.x,
@@ -854,7 +860,7 @@
                     }
                 ];
             }
-            
+
             // Can't split
             return [box];
         }
@@ -883,7 +889,7 @@
             while (stack.length > 0) {
                 const [x, y] = stack.pop();
                 if (x < 0 || x >= width || y < 0 || y >= height) continue;
-                
+
                 const idx = y * width + x;
                 if (visited[idx] || binary[idx] !== 255) continue;
 
@@ -927,7 +933,7 @@
             for (let t = 0; t < 256; t++) {
                 wB += histogram[t];
                 if (wB === 0) continue;
-                
+
                 wF = total - wB;
                 if (wF === 0) break;
 
@@ -970,7 +976,7 @@
             const totalImageArea = width * height;
             const totalObitArea = regions.reduce((sum, r) => sum + r.area, 0);
             const coverage = totalObitArea / totalImageArea;
-            
+
             if (coverage > 0.4 && coverage < 0.85) {
                 score += 20; // Good coverage
             }
@@ -1056,6 +1062,138 @@
             return result;
         }
 
+        async function autoRotate(card) {
+            if (!tesseractWorker) tesseractWorker = await Tesseract.createWorker('eng');
+
+            const sample = document.createElement('canvas');
+            sample.width = sample.height = 300;
+            const sctx = sample.getContext('2d');
+            sctx.drawImage(card.canvas, (card.canvas.width - 300) / 2, (card.canvas.height - 300) / 2, 300, 300, 0, 0, 300, 300);
+
+            let best = 0, bestConf = 0;
+            for (let r = 0; r < 4; r++) {
+                const rotated = rotateCanvas(sample, r * 90);
+                try {
+                    const result = await tesseractWorker.recognize(rotated);
+                    if (result.data.confidence > bestConf) {
+                        bestConf = result.data.confidence;
+                        best = r;
+        function detectRotationFast(canvas) {
+            // Fast rotation detection using edge density analysis
+            // Text typically has strong horizontal edges when oriented correctly
+            
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            
+            // Sample center region only (faster)
+            const sampleW = Math.min(400, width);
+            const sampleH = Math.min(400, height);
+            const startX = Math.floor((width - sampleW) / 2);
+            const startY = Math.floor((height - sampleH) / 2);
+            
+            const imageData = ctx.getImageData(startX, startY, sampleW, sampleH);
+            const data = imageData.data;
+            
+            // Test each rotation by checking text line orientation
+            const scores = [0, 90, 180, 270].map(angle => {
+                return scoreOrientation(data, sampleW, sampleH, angle);
+            });
+            
+            // Find the angle with best score
+            let bestAngle = 0;
+            let bestScore = scores[0];
+            scores.forEach((score, index) => {
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestAngle = [0, 90, 180, 270][index];
+                }
+            });
+            
+            return bestAngle;
+        }
+        
+        function scoreOrientation(data, width, height, angle) {
+            // Score how "text-like" the image appears at this rotation
+            // Method: Count horizontal runs of dark pixels (text lines)
+            
+            let score = 0;
+            const threshold = 128;
+            
+            if (angle === 0 || angle === 180) {
+                // Check horizontal runs
+                for (let y = 0; y < height; y += 10) { // Sample every 10th row
+                    let runLength = 0;
+                    let hasRuns = false;
+                    
+                    for (let x = 0; x < width; x++) {
+                        const i = (y * width + x) * 4;
+                        const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
+                        
+                        if (brightness < threshold) {
+                            runLength++;
+                        } else {
+                            if (runLength > 15) { // Long horizontal run = text line
+                                hasRuns = true;
+                            }
+                            runLength = 0;
+                        }
+                    }
+                } catch (err) {}
+            }
+
+            if (best > 0) {
+                card.canvas = rotateCanvas(card.canvas, best * 90);
+                card.rotated = true;
+                    
+                    if (hasRuns) score++;
+                }
+            } else {
+                // Check vertical runs (becomes horizontal after rotation)
+                for (let x = 0; x < width; x += 10) { // Sample every 10th column
+                    let runLength = 0;
+                    let hasRuns = false;
+                    
+                    for (let y = 0; y < height; y++) {
+                        const i = (y * width + x) * 4;
+                        const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
+                        
+                        if (brightness < threshold) {
+                            runLength++;
+                        } else {
+                            if (runLength > 15) { // Long vertical run
+                                hasRuns = true;
+                            }
+                            runLength = 0;
+                        }
+                    }
+                    
+                    if (hasRuns) score++;
+                }
+            }
+            card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
+            
+            // For 180°, penalize slightly (prefer 0° if equal)
+            if (angle === 180) score *= 0.95;
+            
+            return score;
+        }
+
+        function rotateCanvas(canvas, degrees) {
+            const nc = document.createElement('canvas');
+            const ctx = nc.getContext('2d');
+            if (degrees === 90 || degrees === 270) {
+                nc.width = canvas.height;
+                nc.height = canvas.width;
+            } else {
+                nc.width = canvas.width;
+                nc.height = canvas.height;
+            }
+            ctx.translate(nc.width / 2, nc.height / 2);
+            ctx.rotate((degrees * Math.PI) / 180);
+            ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+            return nc;
+        }
 
         function clearAllScans() {
             if (confirm('Clear all obituaries including saved ones? This cannot be undone.')) {
@@ -1083,7 +1221,7 @@
 
             // Load any previously saved obituaries
             const savedObituaries = loadState();
-            
+
             // Merge: saved obituaries first, then new ones
             if (savedObituaries && savedObituaries.length > 0) {
                 allObituaries = [...savedObituaries, ...newObituaries];
@@ -1184,7 +1322,7 @@
 
         function viewFullImage(index) {
             const obit = allObituaries[index];
-            
+
             // Create new page with image and buttons
             document.body.innerHTML = `
                 <style>
@@ -1327,7 +1465,7 @@
         function initZoomPan(containerId, imageId) {
             const container = document.getElementById(containerId);
             const image = document.getElementById(imageId);
-            
+
             let scale = 1;
             let posX = 0;
             let posY = 0;
@@ -1361,36 +1499,36 @@
             // Zoom with mouse wheel - pin the exact pixel under the mouse
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
-                
+
                 // Get mouse position relative to viewport
                 const mouseX = e.clientX;
                 const mouseY = e.clientY;
-                
+
                 // Get image's natural dimensions
                 const imageNaturalWidth = image.naturalWidth;
                 const imageNaturalHeight = image.naturalHeight;
-                
+
                 // Get image's rendered dimensions
                 const imageRenderedWidth = image.offsetWidth;
                 const imageRenderedHeight = image.offsetHeight;
-                
+
                 // Calculate the scaling factor between natural and rendered size
                 const renderScale = imageRenderedWidth / imageNaturalWidth;
-                
+
                 // Find which pixel of the ORIGINAL image is under the mouse
                 // Account for: position offset, current scale, and initial render scale
                 const imagePixelX = ((mouseX - posX) / scale) / renderScale;
                 const imagePixelY = ((mouseY - posY) / scale) / renderScale;
-                
+
                 // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.5, Math.min(10, scale * delta));
-                
+
                 // Calculate new position to keep that exact pixel under the mouse
                 // mouseX = imagePixelX * renderScale * newScale + newPosX
                 posX = mouseX - (imagePixelX * renderScale * newScale);
                 posY = mouseY - (imagePixelY * renderScale * newScale);
-                
+
                 scale = newScale;
                 updateTransform();
             }, { passive: false });
@@ -1407,13 +1545,13 @@
 
             document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
-                
+
                 const dx = e.clientX - dragStartX;
                 const dy = e.clientY - dragStartY;
-                
+
                 posX = lastPosX + dx;
                 posY = lastPosY + dy;
-                
+
                 updateTransform();
             });
 
@@ -1425,7 +1563,7 @@
         function viewFullScan(index) {
             const obit = allObituaries[index];
             const page = scannedPages.find(p => p.splits.some(s => s.sourcePageIndex === obit.sourcePageIndex));
-            
+
             if (!page) {
                 alert('Original scan not found');
                 return;
@@ -1516,7 +1654,7 @@
         function initZoomPanForScan(containerId, imageId) {
             const container = document.getElementById(containerId);
             const image = document.getElementById(imageId);
-            
+
             let scale = 1;
             let posX = 0;
             let posY = 0;
@@ -1553,32 +1691,32 @@
             // Zoom with mouse wheel - pin the exact pixel under the mouse
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
-                
+
                 // Get mouse position relative to viewport
                 const mouseX = e.clientX;
                 const mouseY = e.clientY;
-                
+
                 // Get image dimensions
                 const imageNaturalWidth = image.naturalWidth;
                 const imageNaturalHeight = image.naturalHeight;
                 const imageRenderedWidth = image.offsetWidth;
                 const imageRenderedHeight = image.offsetHeight;
-                
+
                 // Calculate render scale
                 const renderScale = imageRenderedWidth / imageNaturalWidth;
-                
+
                 // Find which pixel of the original image is under the mouse
                 const imagePixelX = ((mouseX - posX) / scale) / renderScale;
                 const imagePixelY = ((mouseY - posY) / scale) / renderScale;
-                
+
                 // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.1, Math.min(20, scale * delta));
-                
+
                 // Calculate new position to keep that exact pixel under the mouse
                 posX = mouseX - (imagePixelX * renderScale * newScale);
                 posY = mouseY - (imagePixelY * renderScale * newScale);
-                
+
                 scale = newScale;
                 updateTransform();
             }, { passive: false });
@@ -1595,14 +1733,14 @@
 
             document.addEventListener('mousemove', (e) => {
                 if (!isDragging) return;
-                
+
                 const dx = e.clientX - dragStartX;
                 const dy = e.clientY - dragStartY;
-                
+
                 // No bounds - allow infinite panning
                 posX = lastPosX + dx;
                 posY = lastPosY + dy;
-                
+
                 updateTransform();
             });
 
@@ -1642,7 +1780,7 @@
         function backToUpload() {
             // Save current state to localStorage before going back
             saveState();
-            
+
             // Reload to upload screen
             location.reload();
         }

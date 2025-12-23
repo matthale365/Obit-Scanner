@@ -1313,51 +1313,69 @@
             const image = document.getElementById(imageId);
             
             let scale = 1;
-            let translateX = 0;
-            let translateY = 0;
+            let posX = 0;
+            let posY = 0;
             let isDragging = false;
             let dragStartX = 0;
             let dragStartY = 0;
-            let lastTranslateX = 0;
-            let lastTranslateY = 0;
+            let lastPosX = 0;
+            let lastPosY = 0;
 
-            function updateTransform() {
-                image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+            // Wait for image to load, then center it
+            if (image.complete) {
+                centerImage();
+            } else {
+                image.onload = centerImage;
             }
 
-            // Zoom with mouse wheel - using transform-origin for stable zoom
+            function centerImage() {
+                // Center the image initially
+                const containerRect = container.getBoundingClientRect();
+                const imageRect = image.getBoundingClientRect();
+                posX = (containerRect.width - imageRect.width) / 2;
+                posY = (containerRect.height - imageRect.height) / 2;
+                updateTransform();
+            }
+
+            function updateTransform() {
+                image.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+                image.style.transformOrigin = '0 0';
+            }
+
+            // Zoom with mouse wheel - pin the exact pixel under the mouse
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 
-                // Get the image's current bounding box
-                const rect = image.getBoundingClientRect();
+                // Get mouse position relative to viewport
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
                 
-                // Calculate mouse position relative to the image's top-left corner
-                // We need to account for current scale and translation
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
+                // Get image's natural dimensions
+                const imageNaturalWidth = image.naturalWidth;
+                const imageNaturalHeight = image.naturalHeight;
                 
-                // Convert to percentage of image dimensions for transform-origin
-                const percentX = (mouseX / rect.width) * 100;
-                const percentY = (mouseY / rect.height) * 100;
+                // Get image's rendered dimensions
+                const imageRenderedWidth = image.offsetWidth;
+                const imageRenderedHeight = image.offsetHeight;
+                
+                // Calculate the scaling factor between natural and rendered size
+                const renderScale = imageRenderedWidth / imageNaturalWidth;
+                
+                // Find which pixel of the ORIGINAL image is under the mouse
+                // Account for: position offset, current scale, and initial render scale
+                const imagePixelX = ((mouseX - posX) / scale) / renderScale;
+                const imagePixelY = ((mouseY - posY) / scale) / renderScale;
                 
                 // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
-                const oldScale = scale;
-                scale = Math.max(0.5, Math.min(10, scale * delta));
+                const newScale = Math.max(0.5, Math.min(10, scale * delta));
                 
-                // Set transform origin to mouse position
-                image.style.transformOrigin = `${percentX}% ${percentY}%`;
+                // Calculate new position to keep that exact pixel under the mouse
+                // mouseX = imagePixelX * renderScale * newScale + newPosX
+                posX = mouseX - (imagePixelX * renderScale * newScale);
+                posY = mouseY - (imagePixelY * renderScale * newScale);
                 
-                // Adjust translation to keep the point under mouse stationary
-                // When we change transform-origin, we need to compensate translation
-                const scaleDiff = scale - oldScale;
-                const originOffsetX = (rect.width / 2) - mouseX;
-                const originOffsetY = (rect.height / 2) - mouseY;
-                
-                translateX -= originOffsetX * scaleDiff / oldScale;
-                translateY -= originOffsetY * scaleDiff / oldScale;
-                
+                scale = newScale;
                 updateTransform();
             }, { passive: false });
 
@@ -1366,8 +1384,8 @@
                 isDragging = true;
                 dragStartX = e.clientX;
                 dragStartY = e.clientY;
-                lastTranslateX = translateX;
-                lastTranslateY = translateY;
+                lastPosX = posX;
+                lastPosY = posY;
                 e.preventDefault();
             });
 
@@ -1377,8 +1395,8 @@
                 const dx = e.clientX - dragStartX;
                 const dy = e.clientY - dragStartY;
                 
-                translateX = lastTranslateX + dx;
-                translateY = lastTranslateY + dy;
+                posX = lastPosX + dx;
+                posY = lastPosY + dy;
                 
                 updateTransform();
             });
@@ -1484,52 +1502,68 @@
             const image = document.getElementById(imageId);
             
             let scale = 1;
-            let translateX = 0;
-            let translateY = 0;
+            let posX = 0;
+            let posY = 0;
             let isDragging = false;
             let dragStartX = 0;
             let dragStartY = 0;
-            let lastTranslateX = 0;
-            let lastTranslateY = 0;
+            let lastPosX = 0;
+            let lastPosY = 0;
+
+            // Wait for image to load, then center it
+            if (image.complete) {
+                centerImage();
+            } else {
+                image.onload = centerImage;
+            }
+
+            function centerImage() {
+                // Center the image initially
+                const containerRect = container.getBoundingClientRect();
+                const imageRect = image.getBoundingClientRect();
+                posX = (containerRect.width - imageRect.width) / 2;
+                posY = (containerRect.height - imageRect.height) / 2;
+                updateTransform();
+            }
 
             function updateTransform() {
                 const currentTransform = image.style.transform || '';
                 const rotateMatch = currentTransform.match(/rotate\([^)]+\)/);
                 const rotation = rotateMatch ? rotateMatch[0] : '';
-                image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale}) ${rotation}`;
+                image.style.transform = `translate(${posX}px, ${posY}px) scale(${scale}) ${rotation}`;
+                image.style.transformOrigin = '0 0';
             }
 
-            // Zoom with mouse wheel - using transform-origin for stable zoom
+            // Zoom with mouse wheel - pin the exact pixel under the mouse
             container.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 
-                // Get the image's current bounding box
-                const rect = image.getBoundingClientRect();
+                // Get mouse position relative to viewport
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
                 
-                // Calculate mouse position relative to the image
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
+                // Get image dimensions
+                const imageNaturalWidth = image.naturalWidth;
+                const imageNaturalHeight = image.naturalHeight;
+                const imageRenderedWidth = image.offsetWidth;
+                const imageRenderedHeight = image.offsetHeight;
                 
-                // Convert to percentage for transform-origin
-                const percentX = (mouseX / rect.width) * 100;
-                const percentY = (mouseY / rect.height) * 100;
+                // Calculate render scale
+                const renderScale = imageRenderedWidth / imageNaturalWidth;
+                
+                // Find which pixel of the original image is under the mouse
+                const imagePixelX = ((mouseX - posX) / scale) / renderScale;
+                const imagePixelY = ((mouseY - posY) / scale) / renderScale;
                 
                 // Calculate new scale
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
-                const oldScale = scale;
-                scale = Math.max(0.1, Math.min(20, scale * delta));
+                const newScale = Math.max(0.1, Math.min(20, scale * delta));
                 
-                // Set transform origin to mouse position
-                image.style.transformOrigin = `${percentX}% ${percentY}%`;
+                // Calculate new position to keep that exact pixel under the mouse
+                posX = mouseX - (imagePixelX * renderScale * newScale);
+                posY = mouseY - (imagePixelY * renderScale * newScale);
                 
-                // Adjust translation to compensate for origin change
-                const scaleDiff = scale - oldScale;
-                const originOffsetX = (rect.width / 2) - mouseX;
-                const originOffsetY = (rect.height / 2) - mouseY;
-                
-                translateX -= originOffsetX * scaleDiff / oldScale;
-                translateY -= originOffsetY * scaleDiff / oldScale;
-                
+                scale = newScale;
                 updateTransform();
             }, { passive: false });
 
@@ -1538,8 +1572,8 @@
                 isDragging = true;
                 dragStartX = e.clientX;
                 dragStartY = e.clientY;
-                lastTranslateX = translateX;
-                lastTranslateY = translateY;
+                lastPosX = posX;
+                lastPosY = posY;
                 e.preventDefault();
             });
 
@@ -1550,8 +1584,8 @@
                 const dy = e.clientY - dragStartY;
                 
                 // No bounds - allow infinite panning
-                translateX = lastTranslateX + dx;
-                translateY = lastTranslateY + dy;
+                posX = lastPosX + dx;
+                posY = lastPosY + dy;
                 
                 updateTransform();
             });

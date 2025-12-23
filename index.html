@@ -342,19 +342,27 @@
             showStatus(`✓ ${files.length} scan(s) loaded. Detecting obituaries...`, 'info');
 
             // STEP 2: Process all splits in batch (now includes fast rotation detection)
-            for (const scan of pendingScans) {
+            // Process all scans in parallel for maximum speed
+            const processingPromises = pendingScans.map(async (scan) => {
                 const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
-                // Note: Rotation is now handled inside findCards
-
-                // Store page data
-                scannedPages.push({
-                    originalImage: scan.imageData.dataUrl,
-                    filename: scan.file.name,
-                    splits: splits
-                });
-
-                // Display splits
-                displaySplits(scan.rowId, splits);
+                
+                return {
+                    scan,
+                    splits,
+                    pageData: {
+                        originalImage: scan.imageData.dataUrl,
+                        filename: scan.file.name,
+                        splits: splits
+                    }
+                };
+            });
+            
+            const results = await Promise.all(processingPromises);
+            
+            // Store and display results in order
+            for (const result of results) {
+                scannedPages.push(result.pageData);
+                displaySplits(result.scan.rowId, result.splits);
             }
 
             showStatus(`✓ All scans processed. Review the splits below.`, 'success');
@@ -1040,97 +1048,92 @@
 
 
         function detectRotationFast(canvas) {
-            // Fast rotation detection using edge density analysis
-            // Text typically has strong horizontal edges when oriented correctly
+            // Fast rotation detection using text projection profile
+            // Text has distinct horizontal density patterns when correctly oriented
             
             const ctx = canvas.getContext('2d');
             const width = canvas.width;
             const height = canvas.height;
             
-            // Sample center region only (faster)
-            const sampleW = Math.min(400, width);
-            const sampleH = Math.min(400, height);
+            // Sample center region
+            const sampleW = Math.min(600, width);
+            const sampleH = Math.min(600, height);
             const startX = Math.floor((width - sampleW) / 2);
             const startY = Math.floor((height - sampleH) / 2);
             
             const imageData = ctx.getImageData(startX, startY, sampleW, sampleH);
             const data = imageData.data;
             
-            // Test each rotation by checking text line orientation
-            const scores = [0, 90, 180, 270].map(angle => {
-                return scoreOrientation(data, sampleW, sampleH, angle);
-            });
+            // Convert to grayscale and threshold
+            const binary = new Uint8Array(sampleW * sampleH);
+            for (let i = 0; i < sampleW * sampleH; i++) {
+                const idx = i * 4;
+                const gray = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+                binary[i] = gray < 128 ? 1 : 0; // 1 = text (dark), 0 = background (light)
+            }
             
-            // Find the angle with best score
+            // Test each rotation
+            const scores = {
+                0: scoreTextOrientation(binary, sampleW, sampleH, false, false),
+                90: scoreTextOrientation(binary, sampleW, sampleH, true, false),
+                180: scoreTextOrientation(binary, sampleW, sampleH, false, true),
+                270: scoreTextOrientation(binary, sampleW, sampleH, true, true)
+            };
+            
+            console.log('    Rotation scores:', scores);
+            
+            // Find best angle
             let bestAngle = 0;
             let bestScore = scores[0];
-            scores.forEach((score, index) => {
+            for (const [angle, score] of Object.entries(scores)) {
                 if (score > bestScore) {
                     bestScore = score;
-                    bestAngle = [0, 90, 180, 270][index];
+                    bestAngle = parseInt(angle);
                 }
-            });
+            }
             
             return bestAngle;
         }
         
-        function scoreOrientation(data, width, height, angle) {
-            // Score how "text-like" the image appears at this rotation
-            // Method: Count horizontal runs of dark pixels (text lines)
+        function scoreTextOrientation(binary, width, height, transpose, flip) {
+            // Score based on horizontal text line variance
+            // Correct orientation has high variance (alternating text lines and whitespace)
             
-            let score = 0;
-            const threshold = 128;
+            const w = transpose ? height : width;
+            const h = transpose ? width : height;
             
-            if (angle === 0 || angle === 180) {
-                // Check horizontal runs
-                for (let y = 0; y < height; y += 10) { // Sample every 10th row
-                    let runLength = 0;
-                    let hasRuns = false;
+            // Calculate horizontal projection (sum of pixels in each row)
+            const projection = new Array(h).fill(0);
+            
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    let srcX, srcY;
                     
-                    for (let x = 0; x < width; x++) {
-                        const i = (y * width + x) * 4;
-                        const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
-                        
-                        if (brightness < threshold) {
-                            runLength++;
-                        } else {
-                            if (runLength > 15) { // Long horizontal run = text line
-                                hasRuns = true;
-                            }
-                            runLength = 0;
-                        }
+                    if (transpose) {
+                        srcX = flip ? (height - 1 - y) : y;
+                        srcY = flip ? (width - 1 - x) : x;
+                    } else {
+                        srcX = flip ? (width - 1 - x) : x;
+                        srcY = flip ? (height - 1 - y) : y;
                     }
                     
-                    if (hasRuns) score++;
-                }
-            } else {
-                // Check vertical runs (becomes horizontal after rotation)
-                for (let x = 0; x < width; x += 10) { // Sample every 10th column
-                    let runLength = 0;
-                    let hasRuns = false;
-                    
-                    for (let y = 0; y < height; y++) {
-                        const i = (y * width + x) * 4;
-                        const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
-                        
-                        if (brightness < threshold) {
-                            runLength++;
-                        } else {
-                            if (runLength > 15) { // Long vertical run
-                                hasRuns = true;
-                            }
-                            runLength = 0;
-                        }
-                    }
-                    
-                    if (hasRuns) score++;
+                    const idx = srcY * width + srcX;
+                    projection[y] += binary[idx];
                 }
             }
             
-            // For 180°, penalize slightly (prefer 0° if equal)
-            if (angle === 180) score *= 0.95;
+            // Calculate variance of projection
+            // High variance = distinct text lines (correct orientation)
+            const mean = projection.reduce((a, b) => a + b, 0) / h;
+            const variance = projection.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / h;
             
-            return score;
+            // Also reward horizontal edges (derivative of projection)
+            let edgeScore = 0;
+            for (let i = 1; i < projection.length; i++) {
+                edgeScore += Math.abs(projection[i] - projection[i-1]);
+            }
+            
+            return variance * 0.7 + edgeScore * 0.3;
         }
 
         function rotateCanvas(canvas, degrees) {

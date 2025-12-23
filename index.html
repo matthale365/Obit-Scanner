@@ -350,20 +350,23 @@
                 tesseractWorker = await Tesseract.createWorker('eng');
             }
 
-            for (const scan of pendingScans) {
+                       // NEW: Parallel processing of all loaded scans
+            const processingPromises = pendingScans.map(async (scan) => {
+                // This now runs simultaneously for every image uploaded
                 const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
-                // Note: Rotation is now handled inside findCards
-
-                // Store page data
+                
                 scannedPages.push({
                     originalImage: scan.imageData.dataUrl,
                     filename: scan.file.name,
                     splits: splits
                 });
-
-                // Display splits
+            
+                // Each row updates its UI as soon as it is personally finished
                 displaySplits(scan.rowId, splits);
-            }
+            });
+            
+            // Wait for the entire batch to finish before showing the final success message
+            await Promise.all(processingPromises);
 
             showStatus(`✓ All scans processed. Review the splits below.`, 'success');
             document.getElementById('verifyControls').classList.remove('hidden');
@@ -585,18 +588,23 @@
                 let rotationAngle = 0;
                 try {
                     console.log(`  Obit ${i+1}: Detecting rotation...`);
-                    const result0 = await tesseractWorker.recognize(tempCanvas);
-                    let bestConf = result0.data.confidence;
-                    rotationAngle = 0;
-
-                    for (let angle of [90, 180, 270]) {
-                        const rotated = rotateCanvas(tempCanvas, angle);
-                        const result = await tesseractWorker.recognize(rotated);
-                        if (result.data.confidence > bestConf) {
-                            bestConf = result.data.confidence;
-                            rotationAngle = angle;
-                        }
-                    }
+                    // NEW: Run all 4 rotation checks at the same time
+                    const angles = [0, 90, 180, 270];
+                    const rotationPromises = angles.map(async (angle) => {
+                        const testCanvas = angle === 0 ? tempCanvas : rotateCanvas(tempCanvas, angle);
+                        const result = await tesseractWorker.recognize(testCanvas);
+                        return { angle, confidence: result.data.confidence };
+                    });
+                    
+                    const results = await Promise.all(rotationPromises);
+                    
+                    // Simply pick the result with the highest confidence
+                    let bestResult = results.reduce((prev, current) => 
+                        (prev.confidence > current.confidence) ? prev : current
+                    );
+                    
+                    rotationAngle = bestResult.angle;
+                    let bestConf = bestResult.confidence;
                     console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
                 } catch (err) {
                     console.log(`    Rotation detection failed, using 0°`);

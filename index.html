@@ -133,11 +133,39 @@
             margin-top: 12px;
         }
 
-        .processing-indicator {
-            text-align: center;
-            padding: 20px;
-            color: var(--text-secondary);
+        /* Manual selection modal */
+        .selection-canvas-container {
+            position: relative;
+            display: inline-block;
+            max-width: 90vw;
+            max-height: 70vh;
+            overflow: auto;
+            background: var(--bg-dark);
+            border-radius: 8px;
         }
+
+        .selection-box {
+            position: absolute;
+            border: 3px solid var(--accent-blue);
+            background: rgba(59, 130, 246, 0.2);
+            cursor: move;
+            min-width: 50px;
+            min-height: 50px;
+        }
+
+        .selection-box-handle {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: var(--accent-blue);
+            border: 2px solid white;
+        }
+        .handle-nw { top: -6px; left: -6px; cursor: nw-resize; }
+        .handle-ne { top: -6px; right: -6px; cursor: ne-resize; }
+        .handle-sw { bottom: -6px; left: -6px; cursor: sw-resize; }
+        .handle-se { bottom: -6px; right: -6px; cursor: se-resize; }
+
+        .processing-indicator { text-align: center; padding: 20px; color: var(--text-secondary); }
 
         .spinner {
             border: 3px solid var(--bg-light); border-top: 3px solid var(--accent-blue);
@@ -164,6 +192,15 @@
             color: var(--accent-green);
         }
 
+
+        .navigation {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px; padding: 16px 20px; background: var(--bg-medium);
+            border-radius: 12px;
+        }
+        .nav-title { font-size: 1.2rem; font-weight: 600; }
+        .nav-buttons { display: flex; gap: 12px; }
+
         .progress-section {
             background: var(--bg-medium); border-radius: 12px; padding: 40px;
             margin-bottom: 30px; text-align: center;
@@ -185,8 +222,9 @@
 <body>
     <div class="container">
         <header>
-            <h1>📄 Obituary Scanner (Optimized)</h1>
+            <h1>📄 Obituary Scanner</h1>
             <p style="color: var(--text-secondary); margin-top: 10px;">Upload scans → Verify splits → Extract text</p>
+
         </header>
 
         <div id="uploadSection">
@@ -207,19 +245,6 @@
             </div>
 
             <div id="statusMessage"></div>
-            
-            <!-- Progress section for parallel processing -->
-            <div id="processingProgress" class="hidden">
-                <div class="progress-section">
-                    <h2>🔍 Processing Scans...</h2>
-                    <div class="spinner"></div>
-                    <div class="progress-bar-container">
-                        <div class="progress-bar" id="progressBar" style="width: 0%"></div>
-                    </div>
-                    <p id="progressText" style="margin-top: 20px; color: var(--text-secondary);">Initializing...</p>
-                </div>
-            </div>
-            
             <div id="scanRowsContainer"></div>
 
             <div class="controls hidden" id="verifyControls">
@@ -227,6 +252,18 @@
                 <button class="btn btn-success" onclick="showGrid()">➡️ Next</button>
             </div>
         </div>
+
+        <div id="processingSection" class="hidden">
+            <div class="progress-section">
+                <h2>🔍 Extracting Text...</h2>
+                <div class="spinner"></div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                </div>
+                <p id="progressText" style="margin-top: 20px; color: var(--text-secondary);">Processing...</p>
+            </div>
+        </div>
+
     </div>
 
     <script>
@@ -239,6 +276,8 @@
             console.log('Initializing...');
             const fileInput = document.getElementById('fileInput');
             const dropZone = document.getElementById('dropZone');
+            console.log('fileInput:', fileInput);
+            console.log('dropZone:', dropZone);
 
             // Check for saved obituaries
             const saved = loadState();
@@ -266,103 +305,72 @@
         function showStatus(message, type = '') {
             const statusEl = document.getElementById('statusMessage');
             if (statusEl) {
-                statusEl.innerHTML = `<div class="status-message ${type}">${message}</div>`;
+                statusEl.textContent = message;
+                statusEl.className = type; // 'info', 'success', 'warning', 'error'
             }
-        }
-
-        function updateProgress(current, total, message) {
-            const progressBar = document.getElementById('progressBar');
-            const progressText = document.getElementById('progressText');
-            const percentage = Math.round((current / total) * 100);
-            
-            if (progressBar) progressBar.style.width = `${percentage}%`;
-            if (progressText) progressText.textContent = message || `Processing ${current} of ${total}...`;
         }
 
         async function handleFiles(e) {
-            console.log('handleFiles called');
+            console.log('handleFiles called', e);
             const files = Array.from(e.target.files);
+            console.log('Files:', files);
             if (files.length === 0) return;
 
-            // Show progress section
-            document.getElementById('processingProgress').classList.remove('hidden');
-            updateProgress(0, files.length, 'Loading images...');
+            showStatus(`📄 Loading ${files.length} scan(s)...`, 'info');
 
-            // STEP 1: Load all images in parallel
-            console.log(`\n=== Loading ${files.length} scans in parallel ===`);
-            const loadPromises = files.map((file, i) => loadImageFile(file, i));
-            const loadedImages = await Promise.all(loadPromises);
-            
-            updateProgress(files.length, files.length, 'All images loaded!');
-
-            // STEP 2: Create UI rows for all scans immediately
-            console.log(`\n=== Creating UI for ${files.length} scans ===`);
-            const pendingScans = loadedImages.map((imageData, i) => {
+            // STEP 1: Instantly show all scans first
+            const pendingScans = [];
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
                 const pageIndex = scannedPages.length + i;
                 const rowId = `scan-row-${pageIndex}`;
-                
-                addScanRow(rowId, imageData.dataUrl, files[i].name);
+
+                // Load image data
+                const imageData = await loadImageFile(file);
+
+                // Add row immediately with "Processing..." message
+                addScanRow(rowId, imageData.dataUrl, file.name);
                 showScanProcessing(rowId);
-                
-                return {
+
+                // Store for batch processing
+                pendingScans.push({
                     rowId,
                     pageIndex,
-                    file: files[i],
+                    file,
                     imageData
-                };
-            });
+                });
+            }
 
-            // STEP 3: Initialize Tesseract once
+            showStatus(`✓ ${files.length} scan(s) loaded. Detecting obituaries...`, 'info');
+
+            // STEP 2: Process all splits in batch (now includes rotation)
+            // Initialize Tesseract once before processing
             if (!tesseractWorker) {
-                updateProgress(0, pendingScans.length, 'Initializing OCR engine...');
+                showStatus('Processing scans...', 'info');
                 tesseractWorker = await Tesseract.createWorker('eng');
             }
 
-            // STEP 4: Process all scans in parallel
-            console.log(`\n=== Processing ${pendingScans.length} scans in parallel ===`);
-            updateProgress(0, pendingScans.length, 'Detecting obituaries in all scans...');
-            
-            let completed = 0;
-            const processingPromises = pendingScans.map(async (scan, index) => {
-                try {
-                    // Find cards (including rotation detection)
-                    const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
-                    
-                    // Store page data
-                    scannedPages.push({
-                        originalImage: scan.imageData.dataUrl,
-                        filename: scan.file.name,
-                        splits: splits
-                    });
-                    
-                    // Display splits
-                    displaySplits(scan.rowId, splits);
-                    
-                    // Update progress
-                    completed++;
-                    updateProgress(completed, pendingScans.length, `Processed ${completed} of ${pendingScans.length} scans`);
-                    
-                    console.log(`✓ Scan ${index + 1}/${pendingScans.length} complete (${splits.length} obituaries)`);
-                } catch (error) {
-                    console.error(`Error processing scan ${index + 1}:`, error);
-                    displaySplits(scan.rowId, []);
-                    completed++;
-                    updateProgress(completed, pendingScans.length, `Processed ${completed} of ${pendingScans.length} scans (${index + 1} had errors)`);
-                }
-            });
-            
-            // Wait for all processing to complete
-            await Promise.all(processingPromises);
+            for (const scan of pendingScans) {
+                const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
+                // Note: Rotation is now handled inside findCards
 
-            // Hide progress, show success
-            document.getElementById('processingProgress').classList.add('hidden');
-            const totalObits = scannedPages.reduce((sum, page) => sum + page.splits.length, 0);
-            showStatus(`✓ All ${files.length} scans processed! Found ${totalObits} obituaries total.`, 'success');
+                // Store page data
+                scannedPages.push({
+                    originalImage: scan.imageData.dataUrl,
+                    filename: scan.file.name,
+                    splits: splits
+                });
+
+                // Display splits
+                displaySplits(scan.rowId, splits);
+            }
+
+            showStatus(`✓ All scans processed. Review the splits below.`, 'success');
             document.getElementById('verifyControls').classList.remove('hidden');
             document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
         }
 
-        async function loadImageFile(file, index) {
+        async function loadImageFile(file) {
             return new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = (e) => {
@@ -374,7 +382,6 @@
                         canvas.height = img.height;
                         ctx.drawImage(img, 0, 0);
 
-                        console.log(`Image ${index + 1} loaded: ${img.width}x${img.height}`);
                         resolve({
                             dataUrl: e.target.result,
                             canvas: canvas
@@ -455,37 +462,50 @@
             const data = imageData.data;
 
             console.log(`\n=== Processing Scan ${pageIndex + 1}: ${width}x${height} ===`);
+            console.log('Using "Blurred Vision" technique\n');
 
             // Step 1: Grayscale
+            console.log('Step 1: Converting to grayscale...');
             const gray = new Uint8ClampedArray(width * height);
             for (let i = 0; i < data.length; i += 4) {
                 gray[i/4] = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
             }
 
-            // Step 2: HEAVY Gaussian Blur
-            const blurred = gaussianBlur(gray, width, height, 15);
+            // Step 2: HEAVY Gaussian Blur (make letters disappear!)
+            console.log('Step 2: Applying Gaussian blur...');
+            console.log('  (Blurring until individual letters disappear)');
+            const blurred = gaussianBlur(gray, width, height, 15); // Reduced from 25 to 15
 
-            // Step 3: Invert
+            // Step 3: Invert (text becomes white, background becomes black)
+            console.log('Step 3: Inverting image...');
             const inverted = new Uint8ClampedArray(width * height);
             for (let i = 0; i < blurred.length; i++) {
                 inverted[i] = 255 - blurred[i];
             }
 
-            // Step 4: Threshold
+            // Step 4: Threshold (turn grey clouds into solid black blocks)
+            console.log('Step 4: Thresholding...');
             const binary = new Uint8ClampedArray(width * height);
-            const threshold = 25;
+            const threshold = 25; // Lower threshold to catch fainter boundaries
 
             for (let i = 0; i < inverted.length; i++) {
                 binary[i] = inverted[i] > threshold ? 255 : 0;
             }
 
-            // Step 4.5: Add virtual boundaries
-            const borderWidth = 30;
+            let whitePixels = 0;
+            for (let i = 0; i < binary.length; i++) {
+                if (binary[i] === 255) whitePixels++;
+            }
+            console.log(`  ${whitePixels} white pixels (${(whitePixels/binary.length*100).toFixed(1)}%)`);
+
+            // ADD VIRTUAL BOUNDARIES: Draw white borders at scan edges
+            console.log('\nStep 4.5: Adding virtual boundaries at scan edges...');
+            const borderWidth = 30; // 30px white border
 
             // Top border
             for (let y = 0; y < borderWidth; y++) {
                 for (let x = 0; x < width; x++) {
-                    binary[y * width + x] = 0;
+                    binary[y * width + x] = 0; // Black (background)
                 }
             }
 
@@ -510,19 +530,26 @@
                 }
             }
 
-            // Step 5: Light dilation
+            console.log(`  Added ${borderWidth}px black borders on all edges`);
+
+            // Step 5: Light dilation to ensure blobs are solid
+            console.log('\nStep 5: Light dilation to solidify blobs...');
             let morphed = binary.slice();
             for (let iter = 0; iter < 3; iter++) {
                 morphed = morphDilate(morphed, width, height, 5);
             }
 
-            // Step 6: Find contours
+            // Step 6: Find contours (coastlines of black blobs)
+            console.log('\nStep 6: Finding contours (blob coastlines)...');
             const contours = findConnectedComponents(morphed, width, height);
+            console.log(`  Found ${contours.length} contours`);
 
             // Step 7: Get bounding boxes and filter
+            console.log('\nStep 7: Calculating bounding boxes...');
             const boxes = filterAndSortBoxes(contours, width, height);
 
             if (boxes.length === 0) {
+                console.log('No valid boxes found, returning full image');
                 return [{
                     canvas: sourceCanvas,
                     dataUrl: sourceCanvas.toDataURL('image/jpeg', 0.95),
@@ -531,9 +558,18 @@
                 }];
             }
 
-            // Step 8: Crop and rotate (using parallel rotation detection within each scan)
-            const cards = await Promise.all(boxes.map(async (box, i) => {
-                // Initial crop with generous padding
+            console.log(`\n✓ Found ${boxes.length} obituaries`);
+
+            // Step 8: Crop original image using bounding boxes
+            console.log('\nStep 8: Cropping original image with rotation-aware expansion...');
+            const cards = [];
+
+            for (let i = 0; i < boxes.length; i++) {
+                const box = boxes[i];
+
+                // APPROACH: Detect rotation, expand in the direction that will become "top" after rotation
+
+                // Step 1: Initial crop with generous padding
                 const initialPadding = 250;
                 const x1 = Math.max(0, box.x - initialPadding);
                 const y1 = Math.max(0, box.y - initialPadding);
@@ -545,9 +581,10 @@
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
 
-                // Detect rotation
+                // Step 2: Detect rotation
                 let rotationAngle = 0;
                 try {
+                    console.log(`  Obit ${i+1}: Detecting rotation...`);
                     const result0 = await tesseractWorker.recognize(tempCanvas);
                     let bestConf = result0.data.confidence;
                     rotationAngle = 0;
@@ -560,62 +597,85 @@
                             rotationAngle = angle;
                         }
                     }
+                    console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
                 } catch (err) {
-                    console.log(`Rotation detection failed for obit ${i + 1}, using 0°`);
+                    console.log(`    Rotation detection failed, using 0°`);
                 }
 
-                // Calculate final crop with top expansion based on rotation
+                // Step 3: Calculate final crop with top expansion
+                // KEY: After we rotate the crop, which direction becomes "top"?
+                // If we need to rotate 90° CW, the LEFT side becomes top
+                // If we need to rotate 180°, the BOTTOM becomes top
+                // If we need to rotate 270° CW, the RIGHT side becomes top
+
                 const topExpansion = 200;
                 const sidePadding = 40;
 
                 let finalX, finalY, finalW, finalH;
 
                 if (rotationAngle === 0) {
+                    // No rotation needed - expand UP
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - topExpansion);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
+                    console.log(`    Direction: UP (y - ${topExpansion})`);
+
                 } else if (rotationAngle === 90) {
+                    // Rotate 90° CW - LEFT side becomes top, so expand LEFT
                     finalX = Math.max(0, box.x - topExpansion);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
                     finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
+                    console.log(`    Direction: LEFT (x - ${topExpansion})`);
+
                 } else if (rotationAngle === 180) {
+                    // Rotate 180° - BOTTOM becomes top, so expand DOWN
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
-                } else {
+                    console.log(`    Direction: DOWN (h + ${topExpansion})`);
+
+                } else { // 270
+                    // Rotate 270° CW (90° CCW) - RIGHT side becomes top, so expand RIGHT
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
                     finalH = Math.min(height - finalY, box.h + 2 * sidePadding);
+                    console.log(`    Direction: RIGHT (w + ${topExpansion})`);
                 }
 
-                // Crop from original
+                // Step 4: Crop from original with calculated box
                 const finalCanvas = document.createElement('canvas');
                 finalCanvas.width = finalW;
                 finalCanvas.height = finalH;
                 finalCanvas.getContext('2d').drawImage(sourceCanvas, finalX, finalY, finalW, finalH, 0, 0, finalW, finalH);
 
-                // Rotate to correct orientation
+                // Step 5: Rotate to correct orientation
                 let rotatedCanvas = finalCanvas;
                 if (rotationAngle > 0) {
                     rotatedCanvas = rotateCanvas(finalCanvas, rotationAngle);
                 }
 
-                return {
+                console.log(`    Final size: ${rotatedCanvas.width}x${rotatedCanvas.height}`);
+
+                cards.push({
                     canvas: rotatedCanvas,
                     dataUrl: rotatedCanvas.toDataURL('image/jpeg', 0.95),
                     rotated: rotationAngle > 0,
                     sourcePageIndex: pageIndex
-                };
-            }));
+                });
+            }
 
             return cards;
         }
 
         function gaussianBlur(gray, width, height, radius) {
+            // Heavy Gaussian blur to make letters disappear
+            console.log(`  Blur radius: ${radius}px`);
+
+            // Create Gaussian kernel
             const kernel = [];
             const sigma = radius / 3;
             let sum = 0;
@@ -626,34 +686,41 @@
                 sum += value;
             }
 
+            // Normalize kernel
             for (let i = 0; i < kernel.length; i++) {
                 kernel[i] /= sum;
             }
 
+            // Horizontal pass
             const temp = new Uint8ClampedArray(width * height);
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     let value = 0;
+
                     for (let k = -radius; k <= radius; k++) {
                         const nx = x + k;
                         if (nx >= 0 && nx < width) {
                             value += gray[y * width + nx] * kernel[k + radius];
                         }
                     }
+
                     temp[y * width + x] = Math.round(value);
                 }
             }
 
+            // Vertical pass
             const output = new Uint8ClampedArray(width * height);
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
                     let value = 0;
+
                     for (let k = -radius; k <= radius; k++) {
                         const ny = y + k;
                         if (ny >= 0 && ny < height) {
                             value += temp[ny * width + x] * kernel[k + radius];
                         }
                     }
+
                     output[y * width + x] = Math.round(value);
                 }
             }
@@ -669,22 +736,48 @@
                 const areaPercent = (box.area / imageArea) * 100;
                 const aspectRatio = Math.max(box.w, box.h) / Math.min(box.w, box.h);
 
-                if (box.w < 150 || box.h < 150) continue;
-                if (areaPercent < 0.5) continue;
-                if (areaPercent > 90) continue;
-                if (aspectRatio > 40) continue;
+                console.log(`  Box: ${box.w}x${box.h} at (${box.x},${box.y}) - ${areaPercent.toFixed(1)}%`);
 
+                // Filter criteria
+                if (box.w < 150 || box.h < 150) {
+                    console.log(`    ✗ Too small`);
+                    continue;
+                }
+
+                if (areaPercent < 0.5) {
+                    console.log(`    ✗ Tiny area (${areaPercent.toFixed(2)}%)`);
+                    continue;
+                }
+
+                if (areaPercent > 90) {
+                    console.log(`    ✗ Nearly full page`);
+                    continue;
+                }
+
+                if (aspectRatio > 40) {
+                    console.log(`    ✗ Bad aspect ratio (${aspectRatio.toFixed(1)})`);
+                    continue;
+                }
+
+                // Check if box might be multiple obituaries merged
                 if (areaPercent > 25 || aspectRatio > 3.5) {
+                    console.log(`    ! Large/tall box - checking for merged obituaries...`);
                     const splitBoxes = trySplitBox(box, width, height);
+
                     if (splitBoxes.length > 1) {
+                        console.log(`    ✓ Split into ${splitBoxes.length} pieces`);
                         valid.push(...splitBoxes);
                         continue;
+                    } else {
+                        console.log(`    - Could not split, keeping as one`);
                     }
                 }
 
+                console.log(`    ✓ VALID`);
                 valid.push(box);
             }
 
+            // Sort by position (top to bottom, left to right)
             valid.sort((a, b) => {
                 const yDiff = a.y - b.y;
                 if (Math.abs(yDiff) < height * 0.12) {
@@ -697,24 +790,72 @@
         }
 
         function trySplitBox(box, imgWidth, imgHeight) {
+            // Try to split a large box by finding horizontal whitespace gaps
+            // This catches obituaries that got merged because they touch
+
+            console.log(`      Analyzing for splits...`);
+
+            // Look for horizontal white strips (gaps between obituaries)
+            const minGapHeight = 15; // At least 15px of whitespace
+            const whiteThreshold = 0.90; // 90% white = gap
+
+            const rowWhiteness = new Float32Array(box.h);
+
+            // We need access to the original gray image, but we don't have it here
+            // Instead, use a simpler heuristic: split very tall boxes in half
+
             const aspectRatio = Math.max(box.w, box.h) / Math.min(box.w, box.h);
 
+            // If aspect ratio > 3.5, likely stacked obituaries
             if (aspectRatio > 3.5 && box.h > box.w) {
+                // Split vertically in half
+                console.log(`      Splitting tall box (AR=${aspectRatio.toFixed(1)})`);
+
                 const midY = Math.floor(box.h / 2);
+
                 return [
-                    { x: box.x, y: box.y, w: box.w, h: midY, area: box.w * midY },
-                    { x: box.x, y: box.y + midY, w: box.w, h: box.h - midY, area: box.w * (box.h - midY) }
+                    {
+                        x: box.x,
+                        y: box.y,
+                        w: box.w,
+                        h: midY,
+                        area: box.w * midY
+                    },
+                    {
+                        x: box.x,
+                        y: box.y + midY,
+                        w: box.w,
+                        h: box.h - midY,
+                        area: box.w * (box.h - midY)
+                    }
                 ];
             }
 
+            // If very wide, split horizontally
             if (aspectRatio > 3.5 && box.w > box.h) {
+                console.log(`      Splitting wide box (AR=${aspectRatio.toFixed(1)})`);
+
                 const midX = Math.floor(box.w / 2);
+
                 return [
-                    { x: box.x, y: box.y, w: midX, h: box.h, area: midX * box.h },
-                    { x: box.x + midX, y: box.y, w: box.w - midX, h: box.h, area: (box.w - midX) * box.h }
+                    {
+                        x: box.x,
+                        y: box.y,
+                        w: midX,
+                        h: box.h,
+                        area: midX * box.h
+                    },
+                    {
+                        x: box.x + midX,
+                        y: box.y,
+                        w: box.w - midX,
+                        h: box.h,
+                        area: (box.w - midX) * box.h
+                    }
                 ];
             }
 
+            // Can't split
             return [box];
         }
 
@@ -757,11 +898,119 @@
             }
 
             return {
-                x: minX, y: minY,
+                x: minX,
+                y: minY,
                 w: maxX - minX + 1,
                 h: maxY - minY + 1,
                 area: (maxX - minX + 1) * (maxY - minY + 1),
                 pixelCount: count
+            };
+        }
+
+        function calculateOtsuThreshold(gray) {
+            // Build histogram
+            const histogram = new Array(256).fill(0);
+            for (let i = 0; i < gray.length; i++) {
+                histogram[gray[i]]++;
+            }
+
+            const total = gray.length;
+            let sum = 0;
+            for (let i = 0; i < 256; i++) {
+                sum += i * histogram[i];
+            }
+
+            let sumB = 0, wB = 0, wF = 0;
+            let maxVariance = 0;
+            let threshold = 0;
+
+            for (let t = 0; t < 256; t++) {
+                wB += histogram[t];
+                if (wB === 0) continue;
+
+                wF = total - wB;
+                if (wF === 0) break;
+
+                sumB += t * histogram[t];
+                const mB = sumB / wB;
+                const mF = (sum - sumB) / wF;
+
+                const variance = wB * wF * (mB - mF) * (mB - mF);
+
+                if (variance > maxVariance) {
+                    maxVariance = variance;
+                    threshold = t;
+                }
+            }
+
+            return threshold;
+        }
+
+        function scoreDetectionResult(regions, width, height) {
+            if (regions.length === 0) return 0;
+
+            let score = 0;
+
+            // Prefer 3-6 obituaries (most common)
+            if (regions.length >= 3 && regions.length <= 6) {
+                score += 50;
+            } else if (regions.length >= 2 && regions.length <= 8) {
+                score += 30;
+            } else {
+                score += 10;
+            }
+
+            // Check size consistency
+            const avgArea = regions.reduce((sum, r) => sum + r.area, 0) / regions.length;
+            const areaVariance = regions.reduce((sum, r) => sum + Math.abs(r.area - avgArea), 0) / regions.length;
+            const consistency = 1 - (areaVariance / avgArea);
+            score += consistency * 30;
+
+            // Prefer reasonable sizes
+            const totalImageArea = width * height;
+            const totalObitArea = regions.reduce((sum, r) => sum + r.area, 0);
+            const coverage = totalObitArea / totalImageArea;
+
+            if (coverage > 0.4 && coverage < 0.85) {
+                score += 20; // Good coverage
+            }
+
+            return score;
+        }
+
+        function floodFillContour(binary, visited, width, height, startX, startY) {
+            const stack = [[startX, startY]];
+            let minX = startX, maxX = startX;
+            let minY = startY, maxY = startY;
+            let pixelCount = 0;
+
+            while (stack.length > 0) {
+                const [x, y] = stack.pop();
+                const idx = y * width + x;
+
+                if (x < 0 || x >= width || y < 0 || y >= height) continue;
+                if (visited[idx] || binary[idx] !== 255) continue;
+
+                visited[idx] = 1;
+                pixelCount++;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+
+                stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+            }
+
+            const w = maxX - minX + 1;
+            const h = maxY - minY + 1;
+
+            return {
+                x: minX,
+                y: minY,
+                w: w,
+                h: h,
+                area: w * h,
+                pixelCount: pixelCount
             };
         }
 
@@ -786,6 +1035,54 @@
             return result;
         }
 
+        function morphErode(binary, width, height, kernelSize) {
+            const result = new Uint8ClampedArray(width * height);
+            const halfKernel = Math.floor(kernelSize / 2);
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let minVal = 255;
+                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                            const ny = y + ky, nx = x + kx;
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                minVal = Math.min(minVal, binary[ny * width + nx]);
+                            }
+                        }
+                    }
+                    result[y * width + x] = minVal;
+                }
+            }
+            return result;
+        }
+
+        async function autoRotate(card) {
+            if (!tesseractWorker) tesseractWorker = await Tesseract.createWorker('eng');
+
+            const sample = document.createElement('canvas');
+            sample.width = sample.height = 300;
+            const sctx = sample.getContext('2d');
+            sctx.drawImage(card.canvas, (card.canvas.width - 300) / 2, (card.canvas.height - 300) / 2, 300, 300, 0, 0, 300, 300);
+
+            let best = 0, bestConf = 0;
+            for (let r = 0; r < 4; r++) {
+                const rotated = rotateCanvas(sample, r * 90);
+                try {
+                    const result = await tesseractWorker.recognize(rotated);
+                    if (result.data.confidence > bestConf) {
+                        bestConf = result.data.confidence;
+                        best = r;
+                    }
+                } catch (err) {}
+            }
+
+            if (best > 0) {
+                card.canvas = rotateCanvas(card.canvas, best * 90);
+                card.rotated = true;
+            }
+            card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
+        }
+
         function rotateCanvas(canvas, degrees) {
             const nc = document.createElement('canvas');
             const ctx = nc.getContext('2d');
@@ -804,12 +1101,16 @@
 
         function clearAllScans() {
             if (confirm('Clear all obituaries including saved ones? This cannot be undone.')) {
+                // Clear saved state
                 clearState();
+                // Reload page
                 location.reload();
             }
         }
 
+        // ========== SIMPLIFIED GRID VIEW ==========
         function showGrid() {
+            // Collect newly processed obituaries
             const newObituaries = [];
             scannedPages.forEach(page => {
                 page.splits.forEach(split => {
@@ -822,10 +1123,13 @@
                 });
             });
 
+            // Load any previously saved obituaries
             const savedObituaries = loadState();
             
+            // Merge: saved obituaries first, then new ones
             if (savedObituaries && savedObituaries.length > 0) {
                 allObituaries = [...savedObituaries, ...newObituaries];
+                console.log(`Loaded ${savedObituaries.length} saved obituaries + ${newObituaries.length} new = ${allObituaries.length} total`);
             } else {
                 allObituaries = newObituaries;
             }
@@ -835,24 +1139,64 @@
                 return;
             }
 
+            // Save the combined state
             saveState();
 
+            if (allObituaries.length === 0) {
+                alert('No obituaries found!');
+                return;
+            }
+
+            // Create and show grid (no buttons on this page)
             const gridHTML = `
                 <style>
                     :root {
-                        --bg-primary: #1a1a1a; --bg-secondary: #2d2d2d; --bg-medium: #242424;
-                        --bg-light: #333333; --text-primary: #e0e0e0; --text-secondary: #a0a0a0;
-                        --border: #404040; --accent-blue: #3b82f6; --accent-green: #10b981;
+                        --bg-primary: #1a1a1a;
+                        --bg-secondary: #2d2d2d;
+                        --bg-medium: #242424;
+                        --bg-light: #333333;
+                        --text-primary: #e0e0e0;
+                        --text-secondary: #a0a0a0;
+                        --border: #404040;
+                        --accent-blue: #3b82f6;
+                        --accent-green: #10b981;
+                        --accent-yellow: #fbbf24;
                     }
-                    body { margin: 0; padding: 0; background: var(--bg-primary); color: var(--text-primary);
-                           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-                    .btn { padding: 10px 20px; border-radius: 8px; border: none; font-size: 1rem;
-                           cursor: pointer; transition: all 0.3s ease; font-weight: 500; }
-                    .btn-secondary { background: var(--bg-medium); color: var(--text-primary);
-                                    border: 1px solid var(--border); }
-                    .btn-secondary:hover { background: var(--bg-light); transform: translateY(-2px); }
-                    .grid-item { background: var(--bg-medium); }
-                    .grid-item:hover { transform: translateY(-4px); box-shadow: 0 8px 20px rgba(0,0,0,0.4); }
+                    body {
+                        margin: 0;
+                        padding: 0;
+                        background: var(--bg-primary);
+                        color: var(--text-primary);
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    }
+                    h2 {
+                        color: var(--text-primary);
+                    }
+                    .btn {
+                        padding: 10px 20px;
+                        border-radius: 8px;
+                        border: none;
+                        font-size: 1rem;
+                        cursor: pointer;
+                        transition: all 0.3s ease;
+                        font-weight: 500;
+                    }
+                    .btn-secondary {
+                        background: var(--bg-medium);
+                        color: var(--text-primary);
+                        border: 1px solid var(--border);
+                    }
+                    .btn-secondary:hover {
+                        background: var(--bg-light);
+                        transform: translateY(-2px);
+                    }
+                    .grid-item {
+                        background: var(--bg-medium);
+                    }
+                    .grid-item:hover {
+                        transform: translateY(-4px);
+                        box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+                    }
                 </style>
                 <div style="max-width: 1400px; margin: 0 auto; padding: 40px 20px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
@@ -860,16 +1204,17 @@
                             <h2>📋 Review Obituaries (${allObituaries.length})</h2>
                             <p style="color: var(--text-secondary); margin-top: 10px;">Click any obituary to review</p>
                         </div>
-                        <button class="btn btn-secondary" onclick="backToUpload()">← Back to Upload</button>
+                        <button class="btn btn-secondary" onclick="backToUpload()">
+                            ← Back to Upload
+                        </button>
                     </div>
-                    <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px;">
+                    <div id="obituaryGrid" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px;">
                         ${allObituaries.map((obit, index) => `
-                            <div class="grid-item" onclick="viewFullImage(${index})"
-                                 style="cursor: pointer; border: 2px solid var(--border); border-radius: 8px;
-                                        overflow: hidden; transition: transform 0.2s, box-shadow 0.2s;">
+                            <div class="grid-item" onclick="viewFullImage(${index})" style="cursor: pointer; border: 2px solid var(--border); border-radius: 8px; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s; background: var(--bg-medium);">
                                 <img src="${obit.image}" style="width: 100%; height: auto; display: block;" />
-                                <div style="padding: 10px; background: var(--bg-secondary); text-align: center;
-                                           font-size: 0.9rem;">Obituary ${index + 1}</div>
+                                <div style="padding: 10px; background: var(--bg-secondary); text-align: center; font-size: 0.9rem; color: var(--text-primary);">
+                                    Obituary ${index + 1}
+                                </div>
                             </div>
                         `).join('')}
                     </div>
@@ -879,12 +1224,473 @@
             document.body.innerHTML = gridHTML;
         }
 
+        function viewFullImage(index) {
+            const obit = allObituaries[index];
+
+            // Create new page with image and buttons
+            document.body.innerHTML = `
+                <style>
+                    :root {
+                        --bg-primary: #1a1a1a;
+                        --bg-secondary: #2d2d2d;
+                        --bg-medium: #242424;
+                        --bg-light: #333333;
+                        --text-primary: #e0e0e0;
+                        --text-secondary: #a0a0a0;
+                        --border: #404040;
+                        --accent-blue: #3b82f6;
+                        --accent-green: #10b981;
+                        --accent-yellow: #fbbf24;
+                    }
+                    body {
+                        margin: 0;
+                        padding: 0;
+                        background: var(--bg-primary);
+                        color: var(--text-primary);
+                        display: flex;
+                        flex-direction: column;
+                        min-height: 100vh;
+                        overflow: hidden;
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    }
+                    .view-header {
+                        padding: 20px 40px;
+                        background: var(--bg-secondary);
+                        border-bottom: 1px solid var(--border);
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        z-index: 100;
+                    }
+                    .view-header h2 {
+                        color: var(--text-primary);
+                    }
+                    .btn {
+                        padding: 10px 20px;
+                        border-radius: 8px;
+                        border: none;
+                        font-size: 1rem;
+                        cursor: pointer;
+                        transition: all 0.3s ease;
+                        font-weight: 500;
+                    }
+                    .btn-secondary {
+                        background: var(--bg-medium);
+                        color: var(--text-primary);
+                        border: 1px solid var(--border);
+                    }
+                    .btn-secondary:hover {
+                        background: var(--bg-light);
+                        transform: translateY(-2px);
+                    }
+                    .btn-success {
+                        background: var(--accent-green);
+                        color: white;
+                    }
+                    .btn-success:hover {
+                        background: #059669;
+                        transform: translateY(-2px);
+                    }
+                    .btn-primary {
+                        background: var(--accent-blue);
+                        color: white;
+                    }
+                    .btn-primary:hover {
+                        background: #2563eb;
+                        transform: translateY(-2px);
+                    }
+                    .view-content {
+                        flex: 1;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 40px;
+                        overflow: hidden;
+                        position: relative;
+                        cursor: grab;
+                        background: var(--bg-primary);
+                    }
+                    .view-content:active {
+                        cursor: grabbing;
+                    }
+                    .obit-image {
+                        max-width: 90%;
+                        max-height: 80vh;
+                        object-fit: contain;
+                        border-radius: 8px;
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                        user-select: none;
+                        transition: none;
+                    }
+                    .view-full-btn {
+                        position: fixed;
+                        bottom: 30px;
+                        right: 30px;
+                        z-index: 200;
+                    }
+                </style>
+                
+                <div class="view-header">
+                    <div>
+                        <h2 style="margin: 0;">Obituary ${index + 1} of ${allObituaries.length}</h2>
+                        <button class="btn btn-secondary" id="backToGridBtn" style="margin-top: 10px;">
+                            ← Back to Grid
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 15px;">
+                        <button class="btn btn-secondary" id="unsureBtn">
+                            ❓ Unsure
+                        </button>
+                        <button class="btn btn-success" id="doneBtn">
+                            ✓ Done
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="view-content" id="viewContent">
+                    <img src="${obit.image}" class="obit-image" id="obitImage" alt="Obituary ${index + 1}" />
+                </div>
+                
+                <button class="btn btn-primary view-full-btn" id="viewFullScanBtn">
+                    🔍 View Full Scan
+                </button>
+            `;
+
+            // Add event listeners after DOM is created
+            document.getElementById('backToGridBtn').addEventListener('click', () => showGrid());
+            document.getElementById('unsureBtn').addEventListener('click', () => markUnsure(index));
+            document.getElementById('doneBtn').addEventListener('click', () => markDone(index));
+            document.getElementById('viewFullScanBtn').addEventListener('click', () => viewFullScan(index));
+
+            // Initialize zoom and pan for obituary image
+            initZoomPan('viewContent', 'obitImage');
+        }
+
+        function initZoomPan(containerId, imageId) {
+            const container = document.getElementById(containerId);
+            const image = document.getElementById(imageId);
+
+            let scale = 1;
+            let posX = 0;
+            let posY = 0;
+            let isDragging = false;
+            let dragStartX = 0;
+            let dragStartY = 0;
+            let lastPosX = 0;
+            let lastPosY = 0;
+
+            // Wait for image to load, then center it
+            if (image.complete) {
+                centerImage();
+            } else {
+                image.onload = centerImage;
+            }
+
+            function centerImage() {
+                // Center the image initially
+                const containerRect = container.getBoundingClientRect();
+                const imageRect = image.getBoundingClientRect();
+                posX = (containerRect.width - imageRect.width) / 2;
+                posY = (containerRect.height - imageRect.height) / 2;
+                updateTransform();
+            }
+
+            function updateTransform() {
+                image.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+                image.style.transformOrigin = '0 0';
+            }
+
+            // Zoom with mouse wheel - pin the exact pixel under the mouse
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+
+                // Get mouse position relative to viewport
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
+
+                // Get image's natural dimensions
+                const imageNaturalWidth = image.naturalWidth;
+                const imageNaturalHeight = image.naturalHeight;
+
+                // Get image's rendered dimensions
+                const imageRenderedWidth = image.offsetWidth;
+                const imageRenderedHeight = image.offsetHeight;
+
+                // Calculate the scaling factor between natural and rendered size
+                const renderScale = imageRenderedWidth / imageNaturalWidth;
+
+                // Find which pixel of the ORIGINAL image is under the mouse
+                // Account for: position offset, current scale, and initial render scale
+                const imagePixelX = ((mouseX - posX) / scale) / renderScale;
+                const imagePixelY = ((mouseY - posY) / scale) / renderScale;
+
+                // Calculate new scale
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.5, Math.min(10, scale * delta));
+
+                // Calculate new position to keep that exact pixel under the mouse
+                // mouseX = imagePixelX * renderScale * newScale + newPosX
+                posX = mouseX - (imagePixelX * renderScale * newScale);
+                posY = mouseY - (imagePixelY * renderScale * newScale);
+
+                scale = newScale;
+                updateTransform();
+            }, { passive: false });
+
+            // Pan with click and drag (only on image)
+            image.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                lastPosX = posX;
+                lastPosY = posY;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+
+                const dx = e.clientX - dragStartX;
+                const dy = e.clientY - dragStartY;
+
+                posX = lastPosX + dx;
+                posY = lastPosY + dy;
+
+                updateTransform();
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+        }
+
+        function viewFullScan(index) {
+            const obit = allObituaries[index];
+            const page = scannedPages.find(p => p.splits.some(s => s.sourcePageIndex === obit.sourcePageIndex));
+
+            if (!page) {
+                alert('Original scan not found');
+                return;
+            }
+
+            // Create popup overlay
+            const overlay = document.createElement('div');
+            overlay.id = 'fullScanOverlay';
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.95);
+                z-index: 10000;
+                display: flex;
+                flex-direction: column;
+            `;
+
+            overlay.innerHTML = `
+                <style>
+                    .scan-header {
+                        padding: 20px;
+                        background: rgba(0,0,0,0.8);
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        color: white;
+                    }
+                    .scan-content {
+                        flex: 1;
+                        overflow: hidden;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        cursor: grab;
+                    }
+                    .scan-content:active {
+                        cursor: grabbing;
+                    }
+                    .scan-image {
+                        max-width: 95%;
+                        max-height: 90%;
+                        object-fit: contain;
+                        user-select: none;
+                        transition: none;
+                    }
+                </style>
+                
+                <div class="scan-header">
+                    <h3 style="margin: 0;">Full Scan: ${page.filename}</h3>
+                    <div style="display: flex; gap: 15px;">
+                        <button class="btn btn-secondary" id="rotateScanBtn">
+                            🔄 Rotate 90°
+                        </button>
+                        <button class="btn btn-secondary" id="closeScanBtn">
+                            ✕ Close
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="scan-content" id="scanContent">
+                    <img src="${page.originalImage}" class="scan-image" id="scanImage" alt="Full Scan" />
+                </div>
+            `;
+
+            document.body.appendChild(overlay);
+
+            // Event listeners
+            document.getElementById('closeScanBtn').addEventListener('click', () => {
+                overlay.remove();
+            });
+
+            let rotation = 0;
+            document.getElementById('rotateScanBtn').addEventListener('click', () => {
+                rotation = (rotation + 90) % 360;
+                const scanImage = document.getElementById('scanImage');
+                const currentTransform = scanImage.style.transform || '';
+                const baseTransform = currentTransform.replace(/rotate\([^)]+\)/, '').trim();
+                scanImage.style.transform = `${baseTransform} rotate(${rotation}deg)`;
+            });
+
+            // Initialize zoom and pan for full scan
+            initZoomPanForScan('scanContent', 'scanImage');
+        }
+
+        function initZoomPanForScan(containerId, imageId) {
+            const container = document.getElementById(containerId);
+            const image = document.getElementById(imageId);
+
+            let scale = 1;
+            let posX = 0;
+            let posY = 0;
+            let isDragging = false;
+            let dragStartX = 0;
+            let dragStartY = 0;
+            let lastPosX = 0;
+            let lastPosY = 0;
+
+            // Wait for image to load, then center it
+            if (image.complete) {
+                centerImage();
+            } else {
+                image.onload = centerImage;
+            }
+
+            function centerImage() {
+                // Center the image initially
+                const containerRect = container.getBoundingClientRect();
+                const imageRect = image.getBoundingClientRect();
+                posX = (containerRect.width - imageRect.width) / 2;
+                posY = (containerRect.height - imageRect.height) / 2;
+                updateTransform();
+            }
+
+            function updateTransform() {
+                const currentTransform = image.style.transform || '';
+                const rotateMatch = currentTransform.match(/rotate\([^)]+\)/);
+                const rotation = rotateMatch ? rotateMatch[0] : '';
+                image.style.transform = `translate(${posX}px, ${posY}px) scale(${scale}) ${rotation}`;
+                image.style.transformOrigin = '0 0';
+            }
+
+            // Zoom with mouse wheel - pin the exact pixel under the mouse
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+
+                // Get mouse position relative to viewport
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
+
+                // Get image dimensions
+                const imageNaturalWidth = image.naturalWidth;
+                const imageNaturalHeight = image.naturalHeight;
+                const imageRenderedWidth = image.offsetWidth;
+                const imageRenderedHeight = image.offsetHeight;
+
+                // Calculate render scale
+                const renderScale = imageRenderedWidth / imageNaturalWidth;
+
+                // Find which pixel of the original image is under the mouse
+                const imagePixelX = ((mouseX - posX) / scale) / renderScale;
+                const imagePixelY = ((mouseY - posY) / scale) / renderScale;
+
+                // Calculate new scale
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.1, Math.min(20, scale * delta));
+
+                // Calculate new position to keep that exact pixel under the mouse
+                posX = mouseX - (imagePixelX * renderScale * newScale);
+                posY = mouseY - (imagePixelY * renderScale * newScale);
+
+                scale = newScale;
+                updateTransform();
+            }, { passive: false });
+
+            // Pan with click and drag (only on image, no bounds)
+            image.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                lastPosX = posX;
+                lastPosY = posY;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+
+                const dx = e.clientX - dragStartX;
+                const dy = e.clientY - dragStartY;
+
+                // No bounds - allow infinite panning
+                posX = lastPosX + dx;
+                posY = lastPosY + dy;
+
+                updateTransform();
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+        }
+
+        function markUnsure(index) {
+            if (confirm('Mark this obituary as "Unsure" for later review?')) {
+                // Mark as unsure and go to next or back to grid
+                alert('Marked as unsure!');
+                if (index + 1 < allObituaries.length) {
+                    viewFullImage(index + 1); // Next obituary
+                } else {
+                    showGrid(); // Back to grid if last one
+                }
+            }
+        }
+
+        function markDone(index) {
+            if (confirm('Mark this obituary as complete?')) {
+                alert('Marked as done!');
+                if (index + 1 < allObituaries.length) {
+                    viewFullImage(index + 1); // Next obituary
+                } else {
+                    // All done!
+                    if (confirm(`All ${allObituaries.length} obituaries reviewed! Start over?`)) {
+                        location.reload();
+                    } else {
+                        showGrid();
+                    }
+                }
+            }
+        }
+
         function backToUpload() {
+            // Save current state to localStorage before going back
             saveState();
+            
+            // Reload to upload screen
             location.reload();
         }
 
         function saveState() {
+            // Save the current obituaries to localStorage
             const state = {
                 obituaries: allObituaries.map(obit => ({
                     image: obit.image,
@@ -897,10 +1703,12 @@
         }
 
         function loadState() {
+            // Load previously saved obituaries
             const saved = localStorage.getItem('obituary_scanner_state');
             if (saved) {
                 try {
                     const state = JSON.parse(saved);
+                    // Check if state is less than 24 hours old
                     if (Date.now() - state.timestamp < 24 * 60 * 60 * 1000) {
                         return state.obituaries;
                     }
@@ -915,10 +1723,6 @@
             localStorage.removeItem('obituary_scanner_state');
         }
 
-        // Placeholder functions for grid view
-        function viewFullImage(index) {
-            alert(`View obituary ${index + 1} - Full implementation would show detailed view with zoom/pan`);
-        }
     </script>
 </body>
 </html>

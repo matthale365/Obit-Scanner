@@ -1739,7 +1739,71 @@
         function clearState() {
             localStorage.removeItem('obituary_scanner_state');
         }
-
+            // NEW: Transition from "Verify Splits" to "Extract Text"
+        function showGrid() {
+            console.log("Next button clicked. Preparing for OCR...");
+            
+            // 1. Flatten all splits from all pages into one simple list
+            allObituaries = [];
+            scannedPages.forEach(page => {
+                page.splits.forEach(split => {
+                    allObituaries.push({
+                        image: split.dataUrl, // The cropped image
+                        sourceFilename: page.filename,
+                        text: '',
+                        confidence: 0
+                    });
+                });
+            });
+        
+            if (allObituaries.length === 0) {
+                showStatus("No obituaries found! Please add some manually.", "error");
+                return;
+            }
+        
+            // 2. Switch UI Sections
+            document.getElementById('uploadSection').classList.add('hidden');
+            document.getElementById('processingSection').classList.remove('hidden');
+        
+            // 3. Start the heavy processing
+            processAllObituaries();
+        }
+        
+        // NEW: Process every individual cropped obituary image
+        async function processAllObituaries() {
+            const total = allObituaries.length;
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+        
+            for (let i = 0; i < total; i++) {
+                // Update UI
+                const percent = Math.round((i / total) * 100);
+                progressBar.style.width = `${percent}%`;
+                progressText.textContent = `Extracting text from obituary ${i + 1} of ${total}...`;
+        
+                try {
+                    // Run OCR on the single crop
+                    const result = await tesseractWorker.recognize(allObituaries[i].image);
+                    allObituaries[i].text = result.data.text;
+                    allObituaries[i].confidence = result.data.confidence;
+                } catch (err) {
+                    console.error(`Failed on image ${i}:`, err);
+                    allObituaries[i].text = "[OCR Failed]";
+                }
+            }
+        
+            progressBar.style.width = '100%';
+            progressText.textContent = `Successfully processed ${total} images!`;
+            
+            // Save to local storage to prevent data loss
+            saveState();
+        
+            // Final Step: Redirect to a results table or show the final list
+            setTimeout(() => {
+                alert(`Finished! Processed ${total} obituaries.`);
+                // Optional: showResultsTable(); 
+            }, 500);
+        }
     </script>
 </body>
 </html>

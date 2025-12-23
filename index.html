@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Obituary Scanner</title>
+    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -268,6 +269,7 @@
     <script>
         let scannedPages = [];
         let allObituaries = [];
+        let tesseractWorker = null;
 
         // Initialize
         (function() {
@@ -560,15 +562,17 @@
 
             console.log(`\n✓ Found ${boxes.length} obituaries`);
 
-            // Step 8: Crop original image using bounding boxes
-            console.log('\nStep 8: Cropping original image with rotation-aware expansion...');
-            const cards = [];
+            // Step 8: Crop original image using bounding boxes (PARALLEL PROCESSING)
+            console.log('\nStep 8: Processing all obituaries in parallel...');
             
-            for (let i = 0; i < boxes.length; i++) {
-                const box = boxes[i];
-                
-                // APPROACH: Detect rotation, expand in the direction that will become "top" after rotation
-                
+            // Initialize Tesseract worker if needed
+            if (!tesseractWorker) {
+                console.log('  Initializing OCR worker...');
+                tesseractWorker = await Tesseract.createWorker('eng');
+            }
+            
+            // Process all obituaries in parallel
+            const processObituary = async (box, index) => {
                 // Step 1: Initial crop with generous padding
                 const initialPadding = 250;
                 const x1 = Math.max(0, box.x - initialPadding);
@@ -581,30 +585,34 @@
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
                 
-                // Step 2: Fast rotation detection using image analysis (NO OCR!)
-                // Method: Analyze edge density in horizontal vs vertical directions
+                // Step 2: Detect rotation using OCR
                 let rotationAngle = 0;
                 try {
-                    console.log(`  Obit ${i+1}: Detecting rotation (fast method)...`);
-                    rotationAngle = detectRotationFast(tempCanvas);
-                    console.log(`    Detected rotation: ${rotationAngle}°`);
+                    console.log(`  Obit ${index+1}: Detecting rotation...`);
+                    const result0 = await tesseractWorker.recognize(tempCanvas);
+                    let bestConf = result0.data.confidence;
+                    rotationAngle = 0;
+                    
+                    for (let angle of [90, 180, 270]) {
+                        const rotated = rotateCanvas(tempCanvas, angle);
+                        const result = await tesseractWorker.recognize(rotated);
+                        if (result.data.confidence > bestConf) {
+                            bestConf = result.data.confidence;
+                            rotationAngle = angle;
+                        }
+                    }
+                    console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
                 } catch (err) {
                     console.log(`    Rotation detection failed, using 0°`);
                 }
                 
                 // Step 3: Calculate final crop with top expansion
-                // KEY: After we rotate the crop, which direction becomes "top"?
-                // If we need to rotate 90° CW, the LEFT side becomes top
-                // If we need to rotate 180°, the BOTTOM becomes top
-                // If we need to rotate 270° CW, the RIGHT side becomes top
-                
                 const topExpansion = 200;
                 const sidePadding = 40;
                 
                 let finalX, finalY, finalW, finalH;
                 
                 if (rotationAngle === 0) {
-                    // No rotation needed - expand UP
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - topExpansion);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
@@ -612,7 +620,6 @@
                     console.log(`    Direction: UP (y - ${topExpansion})`);
                     
                 } else if (rotationAngle === 90) {
-                    // Rotate 90° CW - LEFT side becomes top, so expand LEFT
                     finalX = Math.max(0, box.x - topExpansion);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
@@ -620,15 +627,13 @@
                     console.log(`    Direction: LEFT (x - ${topExpansion})`);
                     
                 } else if (rotationAngle === 180) {
-                    // Rotate 180° - BOTTOM becomes top, so expand DOWN
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + 2 * sidePadding);
                     finalH = Math.min(height - finalY, box.h + topExpansion + sidePadding);
                     console.log(`    Direction: DOWN (h + ${topExpansion})`);
                     
-                } else { // 270
-                    // Rotate 270° CW (90° CCW) - RIGHT side becomes top, so expand RIGHT
+                } else {
                     finalX = Math.max(0, box.x - sidePadding);
                     finalY = Math.max(0, box.y - sidePadding);
                     finalW = Math.min(width - finalX, box.w + topExpansion + sidePadding);
@@ -650,13 +655,16 @@
                 
                 console.log(`    Final size: ${rotatedCanvas.width}x${rotatedCanvas.height}`);
                 
-                cards.push({
+                return {
                     canvas: rotatedCanvas,
                     dataUrl: rotatedCanvas.toDataURL('image/jpeg', 0.95),
                     rotated: rotationAngle > 0,
                     sourcePageIndex: pageIndex
-                });
-            }
+                };
+            };
+            
+            // Process all boxes in parallel
+            const cards = await Promise.all(boxes.map((box, i) => processObituary(box, i)));
 
             return cards;
         }
@@ -1046,111 +1054,6 @@
             return result;
         }
 
-
-        function detectRotationFast(canvas) {
-            // Fast rotation detection using text projection profile
-            // Text has distinct horizontal density patterns when correctly oriented
-            
-            const ctx = canvas.getContext('2d');
-            const width = canvas.width;
-            const height = canvas.height;
-            
-            // Sample center region
-            const sampleW = Math.min(600, width);
-            const sampleH = Math.min(600, height);
-            const startX = Math.floor((width - sampleW) / 2);
-            const startY = Math.floor((height - sampleH) / 2);
-            
-            const imageData = ctx.getImageData(startX, startY, sampleW, sampleH);
-            const data = imageData.data;
-            
-            // Convert to grayscale and threshold
-            const binary = new Uint8Array(sampleW * sampleH);
-            for (let i = 0; i < sampleW * sampleH; i++) {
-                const idx = i * 4;
-                const gray = (data[idx] + data[idx+1] + data[idx+2]) / 3;
-                binary[i] = gray < 128 ? 1 : 0; // 1 = text (dark), 0 = background (light)
-            }
-            
-            // Test each rotation
-            const scores = {
-                0: scoreTextOrientation(binary, sampleW, sampleH, false, false),
-                90: scoreTextOrientation(binary, sampleW, sampleH, true, false),
-                180: scoreTextOrientation(binary, sampleW, sampleH, false, true),
-                270: scoreTextOrientation(binary, sampleW, sampleH, true, true)
-            };
-            
-            console.log('    Rotation scores:', scores);
-            
-            // Find best angle
-            let bestAngle = 0;
-            let bestScore = scores[0];
-            for (const [angle, score] of Object.entries(scores)) {
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestAngle = parseInt(angle);
-                }
-            }
-            
-            return bestAngle;
-        }
-        
-        function scoreTextOrientation(binary, width, height, transpose, flip) {
-            // Score based on horizontal text line variance
-            // Correct orientation has high variance (alternating text lines and whitespace)
-            
-            const w = transpose ? height : width;
-            const h = transpose ? width : height;
-            
-            // Calculate horizontal projection (sum of pixels in each row)
-            const projection = new Array(h).fill(0);
-            
-            for (let y = 0; y < h; y++) {
-                for (let x = 0; x < w; x++) {
-                    let srcX, srcY;
-                    
-                    if (transpose) {
-                        srcX = flip ? (height - 1 - y) : y;
-                        srcY = flip ? (width - 1 - x) : x;
-                    } else {
-                        srcX = flip ? (width - 1 - x) : x;
-                        srcY = flip ? (height - 1 - y) : y;
-                    }
-                    
-                    const idx = srcY * width + srcX;
-                    projection[y] += binary[idx];
-                }
-            }
-            
-            // Calculate variance of projection
-            // High variance = distinct text lines (correct orientation)
-            const mean = projection.reduce((a, b) => a + b, 0) / h;
-            const variance = projection.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / h;
-            
-            // Also reward horizontal edges (derivative of projection)
-            let edgeScore = 0;
-            for (let i = 1; i < projection.length; i++) {
-                edgeScore += Math.abs(projection[i] - projection[i-1]);
-            }
-            
-            return variance * 0.7 + edgeScore * 0.3;
-        }
-
-        function rotateCanvas(canvas, degrees) {
-            const nc = document.createElement('canvas');
-            const ctx = nc.getContext('2d');
-            if (degrees === 90 || degrees === 270) {
-                nc.width = canvas.height;
-                nc.height = canvas.width;
-            } else {
-                nc.width = canvas.width;
-                nc.height = canvas.height;
-            }
-            ctx.translate(nc.width / 2, nc.height / 2);
-            ctx.rotate((degrees * Math.PI) / 180);
-            ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
-            return nc;
-        }
 
         function clearAllScans() {
             if (confirm('Clear all obituaries including saved ones? This cannot be undone.')) {

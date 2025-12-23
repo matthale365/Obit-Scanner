@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Obituary Scanner</title>
-    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -269,7 +268,6 @@
     <script>
         let scannedPages = [];
         let allObituaries = [];
-        let tesseractWorker = null;
 
         // Initialize
         (function() {
@@ -343,13 +341,7 @@
 
             showStatus(`✓ ${files.length} scan(s) loaded. Detecting obituaries...`, 'info');
 
-            // STEP 2: Process all splits in batch (now includes rotation)
-            // Initialize Tesseract once before processing
-            if (!tesseractWorker) {
-                showStatus('Processing scans...', 'info');
-                tesseractWorker = await Tesseract.createWorker('eng');
-            }
-            
+            // STEP 2: Process all splits in batch (now includes fast rotation detection)
             for (const scan of pendingScans) {
                 const splits = await findCards(scan.imageData.canvas, scan.pageIndex);
                 // Note: Rotation is now handled inside findCards
@@ -581,23 +573,13 @@
                 tempCanvas.height = h1;
                 tempCanvas.getContext('2d').drawImage(sourceCanvas, x1, y1, w1, h1, 0, 0, w1, h1);
                 
-                // Step 2: Detect rotation
+                // Step 2: Fast rotation detection using image analysis (NO OCR!)
+                // Method: Analyze edge density in horizontal vs vertical directions
                 let rotationAngle = 0;
                 try {
-                    console.log(`  Obit ${i+1}: Detecting rotation...`);
-                    const result0 = await tesseractWorker.recognize(tempCanvas);
-                    let bestConf = result0.data.confidence;
-                    rotationAngle = 0;
-                    
-                    for (let angle of [90, 180, 270]) {
-                        const rotated = rotateCanvas(tempCanvas, angle);
-                        const result = await tesseractWorker.recognize(rotated);
-                        if (result.data.confidence > bestConf) {
-                            bestConf = result.data.confidence;
-                            rotationAngle = angle;
-                        }
-                    }
-                    console.log(`    Best rotation: ${rotationAngle}° (confidence: ${bestConf.toFixed(1)}%)`);
+                    console.log(`  Obit ${i+1}: Detecting rotation (fast method)...`);
+                    rotationAngle = detectRotationFast(tempCanvas);
+                    console.log(`    Detected rotation: ${rotationAngle}°`);
                 } catch (err) {
                     console.log(`    Rotation detection failed, using 0°`);
                 }
@@ -1056,31 +1038,99 @@
             return result;
         }
 
-        async function autoRotate(card) {
-            if (!tesseractWorker) tesseractWorker = await Tesseract.createWorker('eng');
 
-            const sample = document.createElement('canvas');
-            sample.width = sample.height = 300;
-            const sctx = sample.getContext('2d');
-            sctx.drawImage(card.canvas, (card.canvas.width - 300) / 2, (card.canvas.height - 300) / 2, 300, 300, 0, 0, 300, 300);
-
-            let best = 0, bestConf = 0;
-            for (let r = 0; r < 4; r++) {
-                const rotated = rotateCanvas(sample, r * 90);
-                try {
-                    const result = await tesseractWorker.recognize(rotated);
-                    if (result.data.confidence > bestConf) {
-                        bestConf = result.data.confidence;
-                        best = r;
+        function detectRotationFast(canvas) {
+            // Fast rotation detection using edge density analysis
+            // Text typically has strong horizontal edges when oriented correctly
+            
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            
+            // Sample center region only (faster)
+            const sampleW = Math.min(400, width);
+            const sampleH = Math.min(400, height);
+            const startX = Math.floor((width - sampleW) / 2);
+            const startY = Math.floor((height - sampleH) / 2);
+            
+            const imageData = ctx.getImageData(startX, startY, sampleW, sampleH);
+            const data = imageData.data;
+            
+            // Test each rotation by checking text line orientation
+            const scores = [0, 90, 180, 270].map(angle => {
+                return scoreOrientation(data, sampleW, sampleH, angle);
+            });
+            
+            // Find the angle with best score
+            let bestAngle = 0;
+            let bestScore = scores[0];
+            scores.forEach((score, index) => {
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestAngle = [0, 90, 180, 270][index];
+                }
+            });
+            
+            return bestAngle;
+        }
+        
+        function scoreOrientation(data, width, height, angle) {
+            // Score how "text-like" the image appears at this rotation
+            // Method: Count horizontal runs of dark pixels (text lines)
+            
+            let score = 0;
+            const threshold = 128;
+            
+            if (angle === 0 || angle === 180) {
+                // Check horizontal runs
+                for (let y = 0; y < height; y += 10) { // Sample every 10th row
+                    let runLength = 0;
+                    let hasRuns = false;
+                    
+                    for (let x = 0; x < width; x++) {
+                        const i = (y * width + x) * 4;
+                        const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
+                        
+                        if (brightness < threshold) {
+                            runLength++;
+                        } else {
+                            if (runLength > 15) { // Long horizontal run = text line
+                                hasRuns = true;
+                            }
+                            runLength = 0;
+                        }
                     }
-                } catch (err) {}
+                    
+                    if (hasRuns) score++;
+                }
+            } else {
+                // Check vertical runs (becomes horizontal after rotation)
+                for (let x = 0; x < width; x += 10) { // Sample every 10th column
+                    let runLength = 0;
+                    let hasRuns = false;
+                    
+                    for (let y = 0; y < height; y++) {
+                        const i = (y * width + x) * 4;
+                        const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
+                        
+                        if (brightness < threshold) {
+                            runLength++;
+                        } else {
+                            if (runLength > 15) { // Long vertical run
+                                hasRuns = true;
+                            }
+                            runLength = 0;
+                        }
+                    }
+                    
+                    if (hasRuns) score++;
+                }
             }
-
-            if (best > 0) {
-                card.canvas = rotateCanvas(card.canvas, best * 90);
-                card.rotated = true;
-            }
-            card.dataUrl = card.canvas.toDataURL('image/jpeg', 0.95);
+            
+            // For 180°, penalize slightly (prefer 0° if equal)
+            if (angle === 180) score *= 0.95;
+            
+            return score;
         }
 
         function rotateCanvas(canvas, degrees) {

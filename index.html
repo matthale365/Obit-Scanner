@@ -279,6 +279,13 @@
             console.log('fileInput:', fileInput);
             console.log('dropZone:', dropZone);
 
+            // Check for saved obituaries
+            const saved = loadState();
+            if (saved && saved.length > 0) {
+                showStatus(`📋 ${saved.length} obituaries from previous session. Upload more to add them, or click "Clear All" to start fresh.`, 'info');
+                document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+            }
+
             fileInput.addEventListener('change', handleFiles);
             dropZone.addEventListener('dragover', (e) => {
                 e.preventDefault();
@@ -1092,13 +1099,22 @@
             return nc;
         }
 
+        function clearAllScans() {
+            if (confirm('Clear all obituaries including saved ones? This cannot be undone.')) {
+                // Clear saved state
+                clearState();
+                // Reload page
+                location.reload();
+            }
+        }
+
         // ========== SIMPLIFIED GRID VIEW ==========
         function showGrid() {
-            // Collect all obituaries
-            allObituaries = [];
+            // Collect newly processed obituaries
+            const newObituaries = [];
             scannedPages.forEach(page => {
                 page.splits.forEach(split => {
-                    allObituaries.push({
+                    newObituaries.push({
                         image: split.dataUrl,
                         canvas: split.canvas,
                         sourcePageIndex: split.sourcePageIndex,
@@ -1106,6 +1122,25 @@
                     });
                 });
             });
+
+            // Load any previously saved obituaries
+            const savedObituaries = loadState();
+            
+            // Merge: saved obituaries first, then new ones
+            if (savedObituaries && savedObituaries.length > 0) {
+                allObituaries = [...savedObituaries, ...newObituaries];
+                console.log(`Loaded ${savedObituaries.length} saved obituaries + ${newObituaries.length} new = ${allObituaries.length} total`);
+            } else {
+                allObituaries = newObituaries;
+            }
+
+            if (allObituaries.length === 0) {
+                alert('No obituaries found!');
+                return;
+            }
+
+            // Save the combined state
+            saveState();
 
             if (allObituaries.length === 0) {
                 alert('No obituaries found!');
@@ -1137,6 +1172,24 @@
                     h2 {
                         color: var(--text-primary);
                     }
+                    .btn {
+                        padding: 10px 20px;
+                        border-radius: 8px;
+                        border: none;
+                        font-size: 1rem;
+                        cursor: pointer;
+                        transition: all 0.3s ease;
+                        font-weight: 500;
+                    }
+                    .btn-secondary {
+                        background: var(--bg-medium);
+                        color: var(--text-primary);
+                        border: 1px solid var(--border);
+                    }
+                    .btn-secondary:hover {
+                        background: var(--bg-light);
+                        transform: translateY(-2px);
+                    }
                     .grid-item {
                         background: var(--bg-medium);
                     }
@@ -1146,9 +1199,14 @@
                     }
                 </style>
                 <div style="max-width: 1400px; margin: 0 auto; padding: 40px 20px;">
-                    <div style="margin-bottom: 30px;">
-                        <h2>📋 Review Obituaries (${allObituaries.length})</h2>
-                        <p style="color: var(--text-secondary); margin-top: 10px;">Click any obituary to review</p>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+                        <div>
+                            <h2>📋 Review Obituaries (${allObituaries.length})</h2>
+                            <p style="color: var(--text-secondary); margin-top: 10px;">Click any obituary to review</p>
+                        </div>
+                        <button class="btn btn-secondary" onclick="backToUpload()">
+                            ← Back to Upload
+                        </button>
                     </div>
                     <div id="obituaryGrid" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px;">
                         ${allObituaries.map((obit, index) => `
@@ -1621,6 +1679,48 @@
                     }
                 }
             }
+        }
+
+        function backToUpload() {
+            // Save current state to localStorage before going back
+            saveState();
+            
+            // Reload to upload screen
+            location.reload();
+        }
+
+        function saveState() {
+            // Save the current obituaries to localStorage
+            const state = {
+                obituaries: allObituaries.map(obit => ({
+                    image: obit.image,
+                    sourcePageIndex: obit.sourcePageIndex,
+                    sourceFilename: obit.sourceFilename
+                })),
+                timestamp: Date.now()
+            };
+            localStorage.setItem('obituary_scanner_state', JSON.stringify(state));
+        }
+
+        function loadState() {
+            // Load previously saved obituaries
+            const saved = localStorage.getItem('obituary_scanner_state');
+            if (saved) {
+                try {
+                    const state = JSON.parse(saved);
+                    // Check if state is less than 24 hours old
+                    if (Date.now() - state.timestamp < 24 * 60 * 60 * 1000) {
+                        return state.obituaries;
+                    }
+                } catch (e) {
+                    console.error('Failed to load state:', e);
+                }
+            }
+            return null;
+        }
+
+        function clearState() {
+            localStorage.removeItem('obituary_scanner_state');
         }
 
     </script>

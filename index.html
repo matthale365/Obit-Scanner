@@ -408,6 +408,14 @@
                 tesseractWorker = await Tesseract.createWorker('eng');
             }
 
+            // Show controls immediately but disable Next button
+            const verifyControls = document.getElementById('verifyControls');
+            verifyControls.classList.remove('hidden');
+            const nextButton = verifyControls.querySelector('.btn-success');
+            nextButton.disabled = true;
+            nextButton.textContent = '⏳ Processing...';
+            document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+
             // NEW: Parallel processing of all loaded scans
             const processingPromises = pendingScans.map(async (scan) => {
                 // This now runs simultaneously for every image uploaded
@@ -431,8 +439,10 @@
             await Promise.all(processingPromises);
 
             showStatus(`✓ All scans processed. Review the splits below.`, 'success');
-            document.getElementById('verifyControls').classList.remove('hidden');
-            document.getElementById('clearAllTopBtn').style.display = 'inline-flex';
+            
+            // Re-enable Next button
+            nextButton.disabled = false;
+            nextButton.textContent = '➡️ Next';
             
             // Save state after processing
             saveState();
@@ -1043,25 +1053,19 @@
         }
 
         function showGrid() {
-            // Collect newly processed obituaries
-            const newObituaries = [];
-            scannedPages.forEach(page => {
-                page.splits.forEach(split => {
-                    newObituaries.push({
-                        image: split.dataUrl,
-                        canvas: split.canvas,
-                        sourcePageIndex: split.sourcePageIndex,
-                        sourceFilename: page.filename
+            // Only collect obituaries if allObituaries is empty
+            // This prevents duplication when returning from viewing an obituary
+            if (allObituaries.length === 0) {
+                scannedPages.forEach(page => {
+                    page.splits.forEach(split => {
+                        allObituaries.push({
+                            image: split.dataUrl,
+                            canvas: split.canvas,
+                            sourcePageIndex: split.sourcePageIndex,
+                            sourceFilename: page.filename
+                        });
                     });
                 });
-            });
-
-            // Merge with existing obituaries
-            if (allObituaries.length === 0) {
-                allObituaries = newObituaries;
-            } else {
-                // Add only new ones
-                allObituaries = [...allObituaries, ...newObituaries];
             }
 
             if (allObituaries.length === 0) {

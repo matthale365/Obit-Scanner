@@ -284,10 +284,10 @@
 
         /* ─── crop bottom bar ─── */
         .crop-controls {
-            position:fixed; bottom:15px; left:50%; transform:translateX(-50%);
-            background:rgba(45,45,45,0.5); padding:8px 12px; border-radius:8px;
-            box-shadow:0 4px 12px var(--shadow); border:1px solid rgba(73,80,87,0.5);
-            display:none; gap:5px; z-index:200; backdrop-filter:blur(4px);
+            position:fixed; bottom:10px; left:50%; transform:translateX(-50%);
+            background:var(--card-bg); padding:8px 12px; border-radius:8px;
+            box-shadow:0 4px 12px var(--shadow); border:1px solid var(--border-color);
+            display:none; gap:5px; z-index:200;
         }
         .crop-controls.active { display:flex; }
         .btn-crop-apply  { 
@@ -301,7 +301,6 @@
             border:none; border-radius:4px; cursor:pointer; font-weight:600;
             transition:background .2s; color:#fff;
         }
-        .btn-crop-cancel:hover { background:#c82333; }
         .btn-crop-reset  { 
             background:#17a2b8; padding:12px 18px; font-size:16px;
             border:none; border-radius:4px; cursor:pointer; font-weight:600;
@@ -828,9 +827,22 @@ document.addEventListener('DOMContentLoaded', function () {
         const cw=canvasContainer.clientWidth, ch=canvasContainer.clientHeight;
         const iw=viewerImage.naturalWidth,    ih=viewerImage.naturalHeight;
         if(!iw||!ih) return;
-        scale      = Math.min(cw/iw, ch/ih, 1)*0.9;
+        
+        // Calculate available space based on mode
+        let availableHeight = ch;
+        let verticalOffset = 0;
+        
+        if(isCropping){
+            // In crop mode: center between viewer controls (top) and crop controls (bottom)
+            const viewerControlsHeight = 100; // Approximate top control bar height
+            const cropControlsHeight = 70;    // Approximate bottom crop controls height + margins
+            availableHeight = ch - viewerControlsHeight - cropControlsHeight;
+            verticalOffset = viewerControlsHeight;
+        }
+        
+        scale      = Math.min(cw/iw, availableHeight/ih, 1)*0.9;
         translateX = (cw - iw*scale)/2;
-        translateY = (ch - ih*scale)/2;
+        translateY = verticalOffset + (availableHeight - ih*scale)/2;
         updateViewerTransform();
     }
     function updateViewerTransform(){

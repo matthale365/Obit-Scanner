@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Image Rotator and Viewer</title>
+    <script src="https://unpkg.com/tesseract.js@v5.0.0/dist/tesseract.min.js"></script>
     <style>
         :root {
             --bg-primary: #1a1a1a;
@@ -657,31 +658,97 @@ document.addEventListener('DOMContentLoaded', function () {
         if(f.length) await addMoreFiles(f);
     });
 
-    async function addMoreFiles(newFiles){
-        loadingMessage.style.display='block';
-        for(const file of newFiles){
-            const d = await fileToDataUrl(file);
+    async function addMoreFiles(newFiles) {
+        loadingMessage.style.display = 'block';
+        
+        // 1. Start the AI worker specifically for this batch of new images
+        const worker = await Tesseract.createWorker('osd', 0);
+
+        for (const file of newFiles) {
+            // 2. Add to your raw files tracking
             uploadedFiles.push(file);
-            processedImages.push({ dataUrl:d, originalDataUrl:d, fileName:file.name });
+
+            // 3. Run the same auto-rotate logic we built for the main button
+            // This calls the helper function we created in the previous step
+            const processedObj = await autoRotateAndProcess(file, worker);
+            
+            // 4. Push the result (which is now correctly oriented) to the grid
+            processedImages.push(processedObj);
         }
+
+        // 5. Clean up
+        await worker.terminate();
+        loadingMessage.style.display = 'none';
         displayGrid();
+    }
+    
+    /* ──────────── auto-rotate + process function ──────────── */
+    async function autoRotateAndProcess(file, worker) {
+    // 1. Convert to Base64
+    const base64Data = await fileToDataUrl(file);
+    
+    // 2. Load into Image object
+    const img = new Image();
+    img.src = base64Data;
+    await new Promise((resolve) => { img.onload = resolve; });
+
+    // 3. Detect
+    const { data } = await worker.detect(img);
+    const angle = data.orientation_degrees || 0;
+    
+    let finalData = base64Data;
+
+    // 4. Rotate if needed
+    if (angle !== 0) {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const w = img.width;
+        const h = img.height;
+
+        if (angle === 90) {
+            canvas.width = h; canvas.height = w;
+            ctx.translate(h, 0); ctx.rotate(Math.PI / 2);
+        } else if (angle === 180) {
+            canvas.width = w; canvas.height = h;
+            ctx.translate(w, h); ctx.rotate(Math.PI);
+        } else if (angle === 270) {
+            canvas.width = h; canvas.height = w;
+            ctx.translate(0, w); ctx.rotate(-Math.PI / 2);
+        }
+        ctx.drawImage(img, 0, 0);
+        finalData = canvas.toDataURL('image/jpeg', 0.95);
     }
 
-    /* ──────────── processing ──────────── */
-    async function processImages(){
-        loadingMessage.style.display='block';
-        imageGrid.innerHTML='';
-        processedImages=[];
-        for(const file of uploadedFiles){
-            const d = await fileToDataUrl(file);
-            processedImages.push({ dataUrl:d, originalDataUrl:d, fileName:file.name });
+    return { 
+        dataUrl: finalData, 
+        originalDataUrl: finalData, 
+        fileName: file.name 
+    };
+}
+    
+    /* ──────────── process all images ──────────── */
+    async function processImages() {
+        if (!uploadedFiles || uploadedFiles.length === 0) return;
+        loadingMessage.style.display = 'block';
+        
+        const worker = await Tesseract.createWorker('osd', 0);
+
+        for (const file of uploadedFiles) {
+            const processedObj = await autoRotateAndProcess(file, worker);
+            processedImages.push(processedObj);
         }
+
+        await worker.terminate();
+        loadingMessage.style.display = 'none';
+        showPage('grid'); // Use your showPage function
         displayGrid();
     }
-    function fileToDataUrl(file){
-        return new Promise(resolve=>{
-            const r=new FileReader();
-            r.onload=e=>resolve(e.target.result);
+    
+    // Keep your original helper function exactly as it was
+    function fileToDataUrl(file) {
+        return new Promise(resolve => {
+            const r = new FileReader();
+            r.onload = e => resolve(e.target.result);
             r.readAsDataURL(file);
         });
     }

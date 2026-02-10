@@ -302,6 +302,7 @@
             border:none; border-radius:4px; cursor:pointer; font-weight:600;
             transition:background .2s; color:#fff;
         }
+		.btn-crop-cancel:hover  { background:#c82333; }
         .btn-crop-reset  { 
             background:#17a2b8; padding:12px 18px; font-size:16px;
             border:none; border-radius:4px; cursor:pointer; font-weight:600;
@@ -376,7 +377,7 @@
             <input type="file" id="fileInput" multiple accept="image/*">
             <label for="fileInput" class="file-input-label">
                 <div style="font-size:48px;margin-bottom:10px">📁</div>
-                <div>Click to select images or drag and drop</div>
+                <div>Choose a file or Drag & Drop</div>
             </label>
         </div>
         <div class="file-count" id="fileCount">No files selected</div>
@@ -421,9 +422,8 @@
             <div class="viewer-info">
                 <span id="viewerFileName" class="viewer-filename"></span>
                 <div class="rotation-controls">
-                    <button class="btn-rotate" id="rotateLeftBtn">⟲ Rotate Left</button>
-                    <button class="btn-rotate" id="rotateRightBtn">⟳ Rotate Right</button>
-                    <button class="btn-crop" id="cropBtn">✂️ Crop</button>
+                    <button class="btn-rotate" id="rotateRightBtn">Rotate</button>
+                    <button class="btn-crop" id="cropBtn">Crop</button>
                 </div>
             </div>
             <button class="btn btn-small" id="doneBtn">✓ Done</button>
@@ -468,9 +468,9 @@
     </div>
 
     <div class="crop-controls" id="cropControls">
-        <button class="btn btn-small btn-crop-reset"  id="resetCropBtn">↺ Reset to Original</button>
+        <button class="btn btn-small btn-crop-reset"  id="resetCropBtn">Reset to Original</button>
         <button class="btn btn-small btn-crop-cancel" id="cancelCropBtn">✕ Cancel</button>
-        <button class="btn btn-small btn-crop-apply"  id="applyCropBtn">✓ Apply Crop</button>
+        <button class="btn btn-small btn-crop-apply"  id="applyCropBtn">Apply Crop</button>
     </div>
 </div>
 
@@ -546,7 +546,6 @@ document.addEventListener('DOMContentLoaded', function () {
     const uploadMoreDropZone  = document.getElementById('uploadMoreDropZone');
     const dragThumbnail       = document.getElementById('dragThumbnail');
     const viewerFileNameEl    = document.getElementById('viewerFileName');
-    const rotateLeftBtn       = document.getElementById('rotateLeftBtn');
     const rotateRightBtn      = document.getElementById('rotateRightBtn');
     const cropBtnEl           = document.getElementById('cropBtn');
     const cropControls        = document.getElementById('cropControls');
@@ -1035,7 +1034,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    rotateLeftBtn.addEventListener('click',  ()=> rotateCurrentImage(-90));
     rotateRightBtn.addEventListener('click', ()=> rotateCurrentImage(90));
 
     function rotateCurrentImage(degrees){
@@ -1102,7 +1100,6 @@ document.addEventListener('DOMContentLoaded', function () {
         // Disable other buttons during crop mode
         backToGridBtn.disabled = true;
         doneBtn.disabled = true;
-        rotateLeftBtn.disabled = true;
         rotateRightBtn.disabled = true;
         cropBtnEl.disabled = true;
 
@@ -1135,7 +1132,6 @@ document.addEventListener('DOMContentLoaded', function () {
         // Re-enable other buttons
         backToGridBtn.disabled = false;
         doneBtn.disabled = false;
-        rotateLeftBtn.disabled = false;
         rotateRightBtn.disabled = false;
         cropBtnEl.disabled = false;
     }
